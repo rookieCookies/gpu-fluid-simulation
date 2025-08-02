@@ -4,21 +4,18 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-glam = { version = "*", features = ["bytemuck", "rand"] }
+glam = { version = "0.30.5", features = ["bytemuck", "rand"] }
 
-wgpu = "*"
-winit = "*"
-bytemuck = "*"
-pollster = "*"
+wgpu = "25.0.2"
+winit = "0.30.12"
+bytemuck = "1.23.1"
+pollster = "0.4.0"
 
-sti = { git = "https://github.com/leddoo/sti" }
+tracing = "0.1.41"
+tracing-subscriber = "0.3.19"
 
+rand = "0.9.2"
 
-tracing = "*"
-tracing-subscriber = "*"
-
-rand = "*"
-
-egui = "*"
-egui-wgpu = { version = "*", features = ["winit"] }
-egui-winit = "*"
+egui = "0.32.0"
+egui-wgpu = { version = "0.32.0", features = ["winit"] }
+egui-winit = "0.32.0"
