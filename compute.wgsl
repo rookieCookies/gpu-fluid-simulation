@@ -20,7 +20,7 @@ fn predict_next_position(
     }
 
 
-    out_particles[id.x] = particle;
+    in_particles[id.x] = particle;
 }
 
 
@@ -36,7 +36,7 @@ fn calculate_density(
     let density = max(calculate_density_at_point(point), 0.1);
     particle.density = density;
 
-    out_particles[id] = particle;
+    in_particles[id] = particle;
 }
 
 
@@ -86,7 +86,7 @@ fn move_particle(
         particle.velocity.y *= -1.0 * u.damping_factor;
     }
 
-    out_particles[id] = particle;
+    in_particles[id] = particle;
 
 }
 

@@ -2,8 +2,11 @@ pub mod renderer;
 pub mod buffer;
 pub mod uniform;
 pub mod shader;
-//pub mod egui_tools;
+pub mod egui_tools;
 
+use std::time::Instant;
+
+use egui_wgpu::wgpu;
 use glam::{Vec2, Vec4};
 use winit::{application::ApplicationHandler, dpi::LogicalSize, event_loop::{ActiveEventLoop, ControlFlow, EventLoop}, window::Window};
 
@@ -13,6 +16,8 @@ use crate::renderer::Renderer;
 struct App {
     renderer: Option<Renderer>,
     state: SimulationState,
+    last_frame: Instant,
+    time_since_last_sim: f32,
 }
 
 
@@ -38,18 +43,35 @@ impl ApplicationHandler for App {
         window_id: winit::window::WindowId,
         event: winit::event::WindowEvent,
     ) {
+        let Some(renderer) = self.renderer.as_mut()
+        else { return };
+
+        renderer
+            .egui
+            .handle_input(renderer.window, &event);
+
+
+
         match event {
             winit::event::WindowEvent::RedrawRequested => {
-                let Some(renderer) = self.renderer.as_mut()
-                else { return };
+                let dt = self.last_frame.elapsed().as_secs_f32();
+                self.last_frame = Instant::now();
 
-                renderer.device.poll(wgpu::MaintainBase::Poll);
+                self.time_since_last_sim += dt;
+
+                renderer.device.poll(wgpu::PollType::Poll).unwrap();
 
                 renderer.render();
 
                 match self.state {
                     SimulationState::Running => {
-                        renderer.simulate();
+                        if renderer.simulation_uniform.delta != 0.0 {
+                            while self.time_since_last_sim > renderer.simulation_uniform.delta {
+                                renderer.simulate();
+                                self.time_since_last_sim -= renderer.simulation_uniform.delta;
+                            }
+
+                        }
                     },
 
                     SimulationState::Step => {
@@ -79,7 +101,10 @@ impl ApplicationHandler for App {
                 match event.physical_key {
                     winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Space) => {
                         match self.state {
-                            SimulationState::Stopped => self.state = SimulationState::Running,
+                            SimulationState::Stopped => {
+                                self.time_since_last_sim = 0.0;
+                                self.state = SimulationState::Running
+                            },
                             _ => self.state = SimulationState::Stopped,
                         }
                     },
@@ -94,10 +119,10 @@ impl ApplicationHandler for App {
             winit::event::WindowEvent::MouseInput { device_id, state, button } => {
                 let renderer = self.renderer.as_mut().unwrap();
                 match (state, button) {
-                    (winit::event::ElementState::Pressed, winit::event::MouseButton::Left) => renderer.mouse_state = -1,
-                    (winit::event::ElementState::Pressed, winit::event::MouseButton::Right) => renderer.mouse_state = 1,
-                    (winit::event::ElementState::Released, winit::event::MouseButton::Left) => renderer.mouse_state = 0,
-                    (winit::event::ElementState::Released, winit::event::MouseButton::Right) => renderer.mouse_state = 0,
+                    (winit::event::ElementState::Pressed, winit::event::MouseButton::Left) => renderer.simulation_uniform.mouse_state = -1,
+                    (winit::event::ElementState::Pressed, winit::event::MouseButton::Right) => renderer.simulation_uniform.mouse_state = 1,
+                    (winit::event::ElementState::Released, winit::event::MouseButton::Left) => renderer.simulation_uniform.mouse_state = 0,
+                    (winit::event::ElementState::Released, winit::event::MouseButton::Right) => renderer.simulation_uniform.mouse_state = 0,
                     _ => (),
                 }
             }
@@ -118,7 +143,13 @@ impl ApplicationHandler for App {
                 let world_pos = world_pos.truncate() / world_pos.w;
                 let world_pos = world_pos.truncate();
 
-                renderer.mouse_pos = world_pos;
+                renderer.simulation_uniform.mouse_pos = world_pos;
+            }
+
+
+
+            winit::event::WindowEvent::Resized(size) => {
+                renderer.resize_surface(size.width, size.height);
             }
 
 
@@ -141,6 +172,8 @@ fn main() {
     let mut app = App {
         renderer: None,
         state: SimulationState::Stopped,
+        last_frame: Instant::now(),
+        time_since_last_sim: 0.0,
     };
 
     event_loop.run_app(&mut app).unwrap();

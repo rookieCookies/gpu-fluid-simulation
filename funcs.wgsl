@@ -41,10 +41,6 @@ var<uniform> u: Uniforms;
 @group(1) @binding(0)
 var<storage, read_write> in_particles : array<ParticleInstance>;
 
-@group(1) @binding(1)
-var<storage, read_write> out_particles : array<ParticleInstance>;
-
-
 
 fn poly6_kernel_gradient(h: f32, r: vec2<f32>) -> vec2<f32> {
     return poly6_kernel_derivative(h, length(r)) * normalize(r);

@@ -1,6 +1,7 @@
 use std::marker::PhantomData;
 
 use bytemuck::Pod;
+use egui_wgpu::wgpu;
 use wgpu::{BindGroupDescriptor, BindGroupLayout, BindGroupLayoutDescriptor, BindingType, BufferDescriptor, BufferUsages, ShaderStages};
 
 #[derive(Debug)]

@@ -4,8 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-wgpu = "*"
 glam = { version = "*", features = ["bytemuck", "rand"] }
+
+wgpu = "*"
 winit = "*"
 bytemuck = "*"
 pollster = "*"
@@ -18,3 +19,6 @@ tracing-subscriber = "*"
 
 rand = "*"
 
+egui = "*"
+egui-wgpu = { version = "*", features = ["winit"] }
+egui-winit = "*"

@@ -1,3 +1,4 @@
+use egui_wgpu::wgpu;
 use wgpu::ShaderSource;
 
 pub fn create_shader_module(device: &wgpu::Device, mut desc: wgpu::ShaderModuleDescriptor) -> wgpu::ShaderModule {

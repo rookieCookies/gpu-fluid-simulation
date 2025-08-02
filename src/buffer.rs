@@ -1,6 +1,7 @@
 use std::{marker::PhantomData, num::NonZeroU64};
 
 use bytemuck::Pod;
+use egui_wgpu::wgpu;
 use tracing::{error, warn};
 //use egui_wgpu::{wgpu, wgpu::util::StagingBelt};
 use wgpu::util::StagingBelt;

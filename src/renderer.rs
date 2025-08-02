@@ -1,17 +1,18 @@
 use std::num::NonZero;
 
 use bytemuck::{offset_of, Pod, Zeroable};
+use egui_wgpu::{wgpu, ScreenDescriptor};
 use glam::{IVec2, IVec3, IVec4, Mat4, Vec2, Vec3, Vec4};
 use rand::Rng;
-use wgpu::{util::{DeviceExt, StagingBelt}, BindGroup, BindGroupDescriptor, BindGroupLayoutDescriptor, BindingType, Buffer, BufferUsages, ComputePipeline, PrimitiveState, PrimitiveTopology, RenderPassDepthStencilAttachment, ShaderStages, TextureUsages, TextureViewDescriptor, VertexAttribute, VertexBufferLayout};
-use winit::{dpi::PhysicalSize, window::Window};
+use wgpu::{util::{DeviceExt, StagingBelt}, BindGroup, BindGroupDescriptor, BindGroupLayout, BindGroupLayoutDescriptor, BindingType, Buffer, BufferUsages, ComputePipeline, PrimitiveState, PrimitiveTopology, RenderPassDepthStencilAttachment, ShaderStages, TextureUsages, TextureViewDescriptor, VertexAttribute, VertexBufferLayout};
+use winit::{dpi::PhysicalSize, window::{self, Window}};
 
-use crate::{buffer::ResizableBuffer, shader::create_shader_module, uniform::Uniform};
+use crate::{buffer::ResizableBuffer, egui_tools::EguiRenderer, shader::create_shader_module, uniform::Uniform};
 
 
 const MSAA_SAMPLE_COUNT : u32 = 1;
 const PARTICLE_SPACING : f32 = 0.4;
-const PARTICLE_COUNT : u64 = 8000;
+const PARTICLE_COUNT : u32 = 8000;
 const SIZE : Vec2 = Vec2::new(53.0, 30.0);
 
 
@@ -27,14 +28,14 @@ pub struct Renderer {
 
     pub particle_pipeline: ParticlePipeline,
     pub simulation_pipeline: SimulationPipeline,
-
-    pub frame_time: u32,
-
-    pub mouse_pos: Vec2,
-    pub mouse_state: i32,
-
+    pub egui: EguiRenderer,
 
     pub projection: Mat4,
+
+
+    pub simulation_uniform: SimulationUniform,
+    pub spawn_settings: SpawnSettings,
+    pub current_settings: SpawnSettings,
 }
 
 
@@ -65,8 +66,8 @@ struct ParticleUniform {
 
 #[derive(Clone, Copy, Zeroable, Pod, Debug)]
 #[repr(C)]
-struct SimulationUniform {
-    delta: f32,
+pub struct SimulationUniform {
+    pub delta: f32,
     particle_count: u32,
     gravity: Vec2,
     bounds: Vec2,
@@ -81,12 +82,19 @@ struct SimulationUniform {
     surface_tension_treshold: f32,
     surface_tension_coefficient: f32,
 
-    mouse_pos: Vec2,
-    mouse_state: i32,
+    pub mouse_pos: Vec2,
+    pub mouse_state: i32,
 
     mouse_force_radius: f32,
     mouse_force_power: f32,
     pad: f32,
+}
+
+
+#[derive(Clone)]
+pub struct SpawnSettings {
+    particle_count: u32,
+    particle_spacing: f32,
 }
 
 
@@ -107,15 +115,14 @@ pub struct ParticlePipeline {
     debug_render_pipeline: wgpu::RenderPipeline,
     vertices: Buffer,
     instances: Buffer,
-    side_buffer: Buffer,
 }
 
 
 pub struct SimulationPipeline {
     compute_pipeline: Box<[ComputePipeline]>,
     uniform: Uniform<SimulationUniform>,
+    main_bgl: BindGroupLayout,
     main_bg: BindGroup,
-    swapped_bg: BindGroup,
 }
 
 
@@ -124,12 +131,14 @@ impl Renderer {
     pub async fn new(window: Window) -> Self {
         let window = Box::leak(Box::new(window));
 
-        let size = PhysicalSize::new(960, 540);
-        let _ = window.request_inner_size(size);
+        let size = window.inner_size();
+
+        dbg!(wgpu::Instance::enabled_backend_features());
 
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             ..Default::default()
         });
+
 
         dbg!(&window);
         let surface = instance.create_surface(&*window).unwrap();
@@ -146,7 +155,7 @@ impl Renderer {
             &wgpu::DeviceDescriptor {
                 required_features: wgpu::Features::POLYGON_MODE_LINE
                                     | wgpu::Features::TEXTURE_BINDING_ARRAY
-                                    | wgpu::Features::UNIFORM_BUFFER_AND_STORAGE_TEXTURE_ARRAY_NON_UNIFORM_INDEXING
+                                    | wgpu::Features::STORAGE_TEXTURE_ARRAY_NON_UNIFORM_INDEXING
                                     | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING
                                     | wgpu::Features::MULTI_DRAW_INDIRECT
                                     | wgpu::Features::INDIRECT_FIRST_INSTANCE
@@ -160,8 +169,8 @@ impl Renderer {
                 },
                 label: Some("main device"),
                 memory_hints: wgpu::MemoryHints::Performance,
+                trace: wgpu::Trace::Off,
             },
-            None,
         ).await.unwrap();
 
         let surface_capabilities = surface.get_capabilities(&adapter);
@@ -319,27 +328,16 @@ impl Renderer {
 
             let instances = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("instances-buffer"),
-                size: PARTICLE_COUNT * size_of::<ParticleInstance>() as u64,
+                size: 1,
                 usage: BufferUsages::VERTEX | BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
             });
-
-
-
-            let side_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("instances-buffer"),
-                size: PARTICLE_COUNT * size_of::<ParticleInstance>() as u64,
-                usage: BufferUsages::VERTEX | BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
-                mapped_at_creation: false,
-            });
-
 
 
             ParticlePipeline {
                 render_pipeline: pipeline,
                 debug_render_pipeline: debug_pipeline,
                 vertices: vertex_buffer,
-                side_buffer,
                 instances,
                 uniform,
             }
@@ -371,16 +369,6 @@ impl Renderer {
                         },
                         count: None,
                     },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: ShaderStages::COMPUTE,
-                        ty: BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: false },
-                            has_dynamic_offset: false,
-                            min_binding_size: None
-                        },
-                        count: None,
-                    },
                 ],
             });
 
@@ -395,29 +383,8 @@ impl Renderer {
                         binding: 0,
                         resource: particles.instances.as_entire_binding(),
                     },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: particles.side_buffer.as_entire_binding(),
-                    }
                 ],
             });
-
-
-            let side_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: None,
-                layout: &bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: particles.side_buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: particles.instances.as_entire_binding(),
-                    }
-                ],
-            });
-
 
 
             let rpl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -460,10 +427,11 @@ impl Renderer {
 
 
             SimulationPipeline {
+
                 compute_pipeline,
                 main_bg: main_bind_group,
-                swapped_bg: side_bind_group,
                 uniform,
+                main_bgl: bind_group_layout,
             }
         };
 
@@ -471,7 +439,20 @@ impl Renderer {
         let staging_belt = StagingBelt::new(128 << 20);
 
 
+        let egui = EguiRenderer::new(
+            &device,
+            config.format,
+            None,
+            MSAA_SAMPLE_COUNT,
+            window
+        );
 
+        let smoothing_radius = PARTICLE_SPACING*2.0;
+
+        let settings = SpawnSettings {
+                particle_count: PARTICLE_COUNT,
+                particle_spacing: PARTICLE_SPACING,
+            };
 
         let mut this = Self {
             surface,
@@ -483,45 +464,42 @@ impl Renderer {
             staging_belt,
             particle_pipeline: particles,
             simulation_pipeline: compute,
-            frame_time: 0,
-
-            mouse_pos: Vec2::new(0.0, 0.0),
-            mouse_state: 0,
+            egui,
             projection: Mat4::IDENTITY,
+
+            spawn_settings: settings.clone(),
+            current_settings: settings,
+
+            simulation_uniform: SimulationUniform {
+                delta: 1.0/60.0,
+                gravity: Vec2::new(0.0, 5.0),
+                bounds: SIZE * 0.9,
+
+                particle_count: PARTICLE_COUNT as _,
+                sqr_radius: smoothing_radius*smoothing_radius,
+                smoothing_radius: smoothing_radius,
+                particle_mass: 1.0,
+                pressure_constant: 100.0,
+                rest_density: 7.86,
+                damping_factor: 0.8,
+                viscosity_coefficient: 0.57,
+                surface_tension_treshold: 0.1,
+                surface_tension_coefficient: 100.0,
+                mouse_force_radius: 5.0,
+                mouse_force_power: 1.5,
+
+
+
+                // state
+                mouse_pos: Vec2::ZERO,
+                mouse_state: 0,
+                frame_time: 0,
+                pad: 0.0,
+            },
         };
 
 
-
-        let mut encoder = this.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("command-encoder"),
-        });
-
-
-        let mut view = this.staging_belt.write_buffer(
-            &mut encoder,
-            &this.particle_pipeline.instances,
-            0,
-            NonZero::new(PARTICLE_COUNT * size_of::<ParticleInstance>() as u64).unwrap(),
-            &this.device
-        );
-
-        let particles_per_row = (PARTICLE_COUNT as f32).sqrt();
-        let particles_per_column = (PARTICLE_COUNT as f32 - 1.0) / particles_per_row + 1.0;
-
-        let buf = Vec::from_iter((0..PARTICLE_COUNT)
-            .map(|i| {
-                let x = i as usize % particles_per_row as usize;
-                let x = (x as f32  - particles_per_row * 0.5 + 0.5) * PARTICLE_SPACING;
-                let y = ((i as f32 / particles_per_row).floor() - particles_per_column * 0.5 + 0.5) * PARTICLE_SPACING;
-
-                ParticleInstance {
-                    position: Vec2::new(x, y),
-                    predicted_position: Vec2::new(x, y),
-                    ..Default::default()
-                }
-
-            })
-        );
+        this.restart_simulation();
 
 
             /*
@@ -537,21 +515,64 @@ impl Renderer {
             })
         );*/
 
-
-        view.copy_from_slice(bytemuck::cast_slice(&buf));
-
-        drop(view);
-
-        this.staging_belt.finish();
-        this.queue.submit(core::iter::once(encoder.finish()));
-
         this
+    }
+
+
+    pub fn restart_simulation(&mut self) {
+        let instances = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("instances-buffer"),
+            size: self.spawn_settings.particle_count as u64 * size_of::<ParticleInstance>() as u64,
+            usage: BufferUsages::VERTEX | BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        self.particle_pipeline.instances.destroy();
+        self.particle_pipeline.instances = instances;
+
+        let main_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &self.simulation_pipeline.main_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.particle_pipeline.instances.as_entire_binding(),
+                },
+            ],
+        });
+
+        self.simulation_pipeline.main_bg = main_bind_group;
+        self.current_settings = self.spawn_settings.clone();
+
+
+        let particle_count = self.spawn_settings.particle_count;
+        let particle_spacing = self.spawn_settings.particle_spacing;
+        
+        let particles_per_row = (particle_count as f32).sqrt();
+        let particles_per_column = (particle_count as f32 - 1.0) / particles_per_row + 1.0;
+
+        let buf = Vec::from_iter((0..particle_count)
+            .map(|i| {
+                let x = i as usize % particles_per_row as usize;
+                let x = (x as f32  - particles_per_row * 0.5 + 0.5) * particle_spacing;
+                let y = ((i as f32 / particles_per_row).floor() - particles_per_column * 0.5 + 0.5) * particle_spacing;
+
+                ParticleInstance {
+                    position: Vec2::new(x, y),
+                    predicted_position: Vec2::new(x, y),
+                    ..Default::default()
+                }
+
+            })
+        );
+
+        self.queue.write_buffer(&self.particle_pipeline.instances, 0, bytemuck::cast_slice(&buf));
     }
 
 
 
     pub fn simulate(&mut self) {
-        self.frame_time += 1;
+        self.simulation_uniform.frame_time += 1;
 
         println!("simulation");
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -559,35 +580,10 @@ impl Renderer {
         });
 
 
-        let smoothing_radius = PARTICLE_SPACING*2.0;
+        self.simulation_uniform.sqr_radius = self.simulation_uniform.smoothing_radius;
+        self.simulation_uniform.particle_count = self.current_settings.particle_count;
         self.simulation_pipeline.uniform.update(&self.queue,
-
-            &SimulationUniform {
-                delta: 1.0/60.0,
-                gravity: Vec2::new(0.0, 5.0),
-                bounds: SIZE * 0.9,
-
-                particle_count: PARTICLE_COUNT as _,
-                frame_time: self.frame_time,
-                sqr_radius: smoothing_radius*smoothing_radius,
-                smoothing_radius: smoothing_radius,
-                particle_mass: 1.0,
-                pressure_constant: 34.38,
-                rest_density: 2.86,
-                damping_factor: 0.8,
-                viscosity_coefficient: 0.57,
-                surface_tension_treshold: 0.1,
-                surface_tension_coefficient: 5.0,
-
-
-                mouse_pos: self.mouse_pos,
-                mouse_state: self.mouse_state,
-
-                mouse_force_radius: 5.0,
-                mouse_force_power: 1.5,
-                pad: 0.0,
-            }
-
+            &self.simulation_uniform
         );
 
 
@@ -597,13 +593,7 @@ impl Renderer {
             cpass.set_bind_group(0, &self.simulation_pipeline.uniform.bind_group, &[]);
             cpass.set_bind_group(1, &self.simulation_pipeline.main_bg, &[]);
             cpass.insert_debug_marker("simulation");
-            cpass.dispatch_workgroups(PARTICLE_COUNT as _, 1, 1);
-
-
-            core::mem::swap(
-                &mut self.simulation_pipeline.main_bg,
-                &mut self.simulation_pipeline.swapped_bg
-            );
+            cpass.dispatch_workgroups(self.current_settings.particle_count as _, 1, 1);
         }
 
 
@@ -648,7 +638,7 @@ impl Renderer {
 
         self.particle_pipeline.uniform.update(&self.queue, &ParticleUniform {
             projection: self.projection,
-            scale: PARTICLE_SPACING,
+            scale: self.spawn_settings.particle_spacing,
             pad00: Vec3::NAN,
             colour0: conv(Vec4::new(54.0, 112.0, 255.0, 255.0) / Vec4::splat(255.0)),
             colour1: conv(Vec4::new(0.0, 225.0, 163.0, 255.0) / Vec4::splat(255.0)),
@@ -682,7 +672,7 @@ impl Renderer {
         pass.set_vertex_buffer(0, self.particle_pipeline.vertices.slice(..));
         pass.set_vertex_buffer(1, self.particle_pipeline.instances.slice(..));
 
-        pass.draw(0..(QUAD_VERTICES.len() as _), 0..(PARTICLE_COUNT as _));
+        pass.draw(0..(QUAD_VERTICES.len() as _), 0..(self.current_settings.particle_count as _));
 
 
         pass.set_pipeline(&self.particle_pipeline.debug_render_pipeline);
@@ -691,10 +681,182 @@ impl Renderer {
 
         drop(pass);
 
+
+        let mut restart_sim = false;
+        {
+
+            let screen_descriptor = ScreenDescriptor {
+                size_in_pixels: [self.config.width, self.config.height],
+                pixels_per_point: self.window.scale_factor() as f32,
+            };
+
+            self.egui.begin_frame(self.window);
+
+
+
+            egui::Window::new("spawn settings")
+                .resizable(true)
+                .vscroll(true)
+                .default_open(true)
+                .show(self.egui.context(), |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("particle count");
+                        ui.add(
+                            egui::widgets::DragValue::new(&mut self.spawn_settings.particle_count)
+                                .range(0..=u32::MAX)
+                                .speed(10),
+                        );
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("particle spacing");
+                        ui.add(
+                            egui::widgets::DragValue::new(&mut self.spawn_settings.particle_spacing)
+                                .range(0.0..=f32::MAX)
+                                .speed(0.025),
+                        );
+                    });
+
+
+                    if ui.button("restart simulation").clicked() {
+                        restart_sim = true;
+                    }
+                });
+
+            egui::Window::new("simulation settings")
+                .resizable(true)
+                .vscroll(true)
+                .default_open(true)
+                .show(self.egui.context(), |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("delta");
+                        ui.add(
+                            egui::widgets::DragValue::new(&mut self.simulation_uniform.delta)
+                                .range(0.0..=1.0)
+                                .speed(0.001),
+                        );
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("gravity");
+                        ui.add(
+                            egui::widgets::DragValue::new(&mut self.simulation_uniform.gravity.x)
+                                .range(0.0..=f32::MAX)
+                                .speed(0.1),
+                        );
+                        ui.add(
+                            egui::widgets::DragValue::new(&mut self.simulation_uniform.gravity.y)
+                                .range(0.0..=f32::MAX)
+                                .speed(0.1),
+                        );
+                    });
+
+
+                    ui.horizontal(|ui| {
+                        ui.label("smoothing radius");
+                        ui.add(
+                            egui::widgets::DragValue::new(&mut self.simulation_uniform.smoothing_radius)
+                                .range(0.0..=f32::MAX)
+                                .speed(0.025),
+                        );
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("particle mass");
+                        ui.add(
+                            egui::widgets::DragValue::new(&mut self.simulation_uniform.particle_mass)
+                                .range(0.0..=f32::MAX)
+                                .speed(0.025),
+                        );
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("pressure constant");
+                        ui.add(
+                            egui::widgets::DragValue::new(&mut self.simulation_uniform.pressure_constant)
+                                .range(0.0..=f32::MAX)
+                                .speed(0.025),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("rest density");
+                        ui.add(
+                            egui::widgets::DragValue::new(&mut self.simulation_uniform.rest_density)
+                                .range(0.0..=f32::MAX)
+                                .speed(0.025),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("damping factor");
+                        ui.add(
+                            egui::widgets::DragValue::new(&mut self.simulation_uniform.damping_factor)
+                                .range(0.0..=f32::MAX)
+                                .speed(0.025),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("viscosity coefficient");
+                        ui.add(
+                            egui::widgets::DragValue::new(&mut self.simulation_uniform.viscosity_coefficient)
+                                .range(0.0..=f32::MAX)
+                                .speed(0.025),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("surface tension treshold");
+                        ui.add(
+                            egui::widgets::DragValue::new(&mut self.simulation_uniform.surface_tension_treshold)
+                                .range(0.0..=f32::MAX)
+                                .speed(0.025),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("surface tension coefficient");
+                        ui.add(
+                            egui::widgets::DragValue::new(&mut self.simulation_uniform.surface_tension_coefficient)
+                                .range(0.0..=f32::MAX)
+                                .speed(0.025),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("mouse force radius");
+                        ui.add(
+                            egui::widgets::DragValue::new(&mut self.simulation_uniform.mouse_force_radius)
+                                .range(0.0..=f32::MAX)
+                                .speed(0.025),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("mouse force power");
+                        ui.add(
+                            egui::widgets::DragValue::new(&mut self.simulation_uniform.mouse_force_power)
+                                .range(0.0..=f32::MAX)
+                                .speed(0.025),
+                        );
+                    });
+                });
+
+            
+            self.egui.end_frame_and_draw(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                self.window,
+                &view,
+                screen_descriptor,
+            );
+        }
+
+
+
         self.staging_belt.finish();
         self.queue.submit(core::iter::once(encoder.finish()));
 
         output.present();
+
+        if restart_sim {
+            self.restart_simulation();
+        }
 
 
     }
@@ -706,6 +868,14 @@ impl Renderer {
         Vec2::new(w as _, h as _)
     }
 
+
+
+
+    pub fn resize_surface(&mut self, width: u32, height: u32) {
+        self.config.width = width;
+        self.config.height = height;
+        self.surface.configure(&self.device, &self.config);
+    }
 
 }
 
