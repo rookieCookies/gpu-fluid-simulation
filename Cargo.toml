@@ -1,0 +1,20 @@
+[package]
+name = "gpu-fluid-simulation"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+wgpu = "*"
+glam = { version = "*", features = ["bytemuck", "rand"] }
+winit = "*"
+bytemuck = "*"
+pollster = "*"
+
+sti = { git = "https://github.com/leddoo/sti" }
+
+
+tracing = "*"
+tracing-subscriber = "*"
+
+rand = "*"
+
