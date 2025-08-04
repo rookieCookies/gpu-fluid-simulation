@@ -1,8 +1,8 @@
-use std::marker::PhantomData;
+use std::{marker::PhantomData, num::NonZero};
 
 use bytemuck::Pod;
 use egui_wgpu::wgpu;
-use wgpu::{BindGroupDescriptor, BindGroupLayout, BindGroupLayoutDescriptor, BindingType, BufferDescriptor, BufferUsages, ShaderStages};
+use wgpu::{util::StagingBelt, BindGroupDescriptor, BindGroupLayout, BindGroupLayoutDescriptor, BindingType, BufferDescriptor, BufferUsages, ShaderStages};
 
 #[derive(Debug)]
 pub struct Uniform<T: Pod> {
@@ -92,6 +92,19 @@ impl<T: Pod> Uniform<T> {
 
     pub fn update(&self, queue: &wgpu::Queue, data: &T) {
         queue.write_buffer(&self.buffer, 0, bytemuck::bytes_of(data));
+    }
+
+
+    pub fn update_belt(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        device: &wgpu::Device,
+        belt: &mut StagingBelt,
+        data: &T
+    ) {
+
+        let mut buf = belt.write_buffer(encoder, &self.buffer, 0, NonZero::new(size_of::<T>() as _).unwrap(), device);
+        buf.copy_from_slice(bytemuck::bytes_of(data));
     }
 
 

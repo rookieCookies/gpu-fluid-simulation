@@ -9,7 +9,7 @@ struct Instance {
     @location(2) predicted_position: vec2<f32>,
     @location(3) velocity: vec2<f32>,
     @location(4) density: f32,
-    @location(5) pad: f32,
+    @location(5) grid: u32,
 }
 
 
@@ -22,8 +22,10 @@ struct Fragment {
 
 struct Uniforms {
     projection: mat4x4<f32>,
-    pad00: vec3<f32>,
+    pad00: f32,
     scale: f32,
+    grid_size: u32,
+    grid_w: u32,
     colour0: vec4<f32>,
     colour1: vec4<f32>,
     colour2: vec4<f32>,
@@ -41,7 +43,10 @@ fn vs_main(vertex: Vertex, instance: Instance) -> Fragment {
     let pos = (vertex.position * u.scale) + instance.position - u.scale * 0.5;
     output.position = u.projection * vec4<f32>(pos.x, pos.y, 0.0, 1.0);
 
-    let step = length(instance.velocity) * 0.1;
+    let step = length(instance.velocity) * 0.05;
+    let grid_x = instance.grid % u.grid_w;
+    let grid_y = instance.grid / u.grid_w;
+    let grid_h = u.grid_size / u.grid_w;
 
     var colour = vec4<f32>(0.0);
     if step < 0.4 {
@@ -52,7 +57,7 @@ fn vs_main(vertex: Vertex, instance: Instance) -> Fragment {
         colour = mix(u.colour2, u.colour3, (step-0.85)/0.15);
     }
 
-    output.modulate = vec4<f32>(colour);
+    output.modulate = colour;
 
     return output;
 }

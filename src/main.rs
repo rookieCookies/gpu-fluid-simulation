@@ -8,6 +8,7 @@ use std::time::Instant;
 
 use egui_wgpu::wgpu;
 use glam::{Vec2, Vec4};
+use wgpu::{hal::CommandEncoder, CommandEncoderDescriptor};
 use winit::{application::ApplicationHandler, dpi::LogicalSize, event_loop::{ActiveEventLoop, ControlFlow, EventLoop}, window::Window};
 
 use crate::renderer::Renderer;
@@ -59,15 +60,18 @@ impl ApplicationHandler for App {
 
                 self.time_since_last_sim += dt;
 
-                renderer.device.poll(wgpu::PollType::Poll).unwrap();
+                let mut encoder = renderer.device.create_command_encoder(&CommandEncoderDescriptor {
+                    label: Some("encoder"),
+                });
 
-                renderer.render();
+                renderer.staging_belt.recall();
+
 
                 match self.state {
                     SimulationState::Running => {
                         if renderer.simulation_uniform.delta != 0.0 {
                             while self.time_since_last_sim > renderer.simulation_uniform.delta {
-                                renderer.simulate();
+                                renderer.simulate(&mut encoder);
                                 self.time_since_last_sim -= renderer.simulation_uniform.delta;
                             }
 
@@ -75,12 +79,16 @@ impl ApplicationHandler for App {
                     },
 
                     SimulationState::Step => {
-                        renderer.simulate();
+                        renderer.simulate(&mut encoder);
                         self.state = SimulationState::Stopped;
                     },
 
                     SimulationState::Stopped => (),
                 };
+
+
+
+                renderer.render(encoder);
                 renderer.window.request_redraw();
             },
 

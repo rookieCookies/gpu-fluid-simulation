@@ -12,7 +12,7 @@ use crate::{buffer::{ResizableBuffer, SSBO}, egui_tools::EguiRenderer, shader::c
 
 
 const MSAA_SAMPLE_COUNT : u32 = 1;
-const PARTICLE_SPACING : f32 = 0.4;
+const PARTICLE_SPACING : f32 = 0.125;
 const PARTICLE_COUNT : u32 = 8000;
 const SIZE : Vec2 = Vec2::new(53.0, 30.0);
 
@@ -48,7 +48,7 @@ struct ParticleInstance {
     predicted_position: Vec2,
     velocity: Vec2,
     density: f32,
-    pad00: f32,
+    grid: u32,
 }
 
 
@@ -56,8 +56,10 @@ struct ParticleInstance {
 #[repr(C)]
 struct ParticleUniform {
     projection: Mat4,
-    pad00: Vec3,
+    pad00: f32,
     scale: f32,
+    grid_size: u32,
+    grid_w: u32,
     colour0: Vec4,
     colour1: Vec4,
     colour2: Vec4,
@@ -107,6 +109,10 @@ pub struct SimulationUniform {
 
     mouse_force_radius: f32,
     mouse_force_power: f32,
+
+
+    grid_w: u32,
+    grid_h: u32,
     pad: f32,
 }
 
@@ -613,7 +619,7 @@ impl Renderer {
         };
 
 
-        let staging_belt = StagingBelt::new(128 << 20);
+        let staging_belt = StagingBelt::new(256);
 
 
         let egui = EguiRenderer::new(
@@ -650,18 +656,18 @@ impl Renderer {
             current_settings: settings,
 
             simulation_uniform: SimulationUniform {
-                delta: 1.0/60.0,
-                gravity: Vec2::new(0.0, 5.0),
+                delta: 1.0/120.0,
+                gravity: Vec2::new(0.0, 6.0),
                 bounds: SIZE * 0.9,
 
                 particle_count: PARTICLE_COUNT as _,
                 sqr_radius: smoothing_radius*smoothing_radius,
                 smoothing_radius: smoothing_radius,
                 particle_mass: 1.0,
-                pressure_constant: 100.0,
-                rest_density: 7.86,
+                pressure_constant: 60.0,
+                rest_density: 90.0,
                 damping_factor: 0.8,
-                viscosity_coefficient: 0.57,
+                viscosity_coefficient: 0.05,
                 surface_tension_treshold: 0.1,
                 surface_tension_coefficient: 100.0,
                 mouse_force_radius: 5.0,
@@ -674,6 +680,8 @@ impl Renderer {
                 mouse_state: 0,
                 frame_time: 0,
                 pad: 0.0,
+                grid_w: 0,
+                grid_h: 0,
             },
         };
 
@@ -773,6 +781,8 @@ impl Renderer {
 
         self.simulation_pipeline.main_bg = main_bind_group;
         self.simulation_uniform.smoothing_radius = self.spawn_settings.smoothing_radius;
+        self.simulation_uniform.grid_w = grid_w as _;
+        self.simulation_uniform.grid_h = grid_h as _;
         self.current_settings = self.spawn_settings.clone();
 
 
@@ -802,17 +812,12 @@ impl Renderer {
 
 
 
-    pub fn simulate(&mut self) {
-        self.sort_spatial_lookup();
-
-
+    pub fn simulate(&mut self, encoder: &mut wgpu::CommandEncoder) {
+        println!("simulataaaee");
         self.simulation_uniform.frame_time += 1;
 
-        println!("simulation");
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("compute-command-encoder"),
-        });
-
+        const WORKGROUP_SIZE : u32 = 128;
+        let num_workgroups = (self.current_settings.particle_count + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE;
 
         self.simulation_uniform.sqr_radius = self.simulation_uniform.smoothing_radius;
         self.simulation_uniform.particle_count = self.current_settings.particle_count;
@@ -828,49 +833,41 @@ impl Renderer {
 
 
         cpass.set_pipeline(&self.simulation_pipeline.predict_next_positions);
-        cpass.dispatch_workgroups(self.current_settings.particle_count as _, 1, 1);
+        cpass.dispatch_workgroups(num_workgroups, 1, 1);
 
         cpass.set_pipeline(&self.simulation_pipeline.create_spatial_lookup);
-        cpass.dispatch_workgroups(self.current_settings.particle_count as _, 1, 1);
+        cpass.dispatch_workgroups(num_workgroups, 1, 1);
 
         drop(cpass);
-        self.queue.submit(core::iter::once(encoder.finish()));
 
-        self.sort_spatial_lookup();
+        self.sort_spatial_lookup(encoder);
 
-
-
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("compute-command-encoder"),
-        });
 
 
         let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: None });
+
 
         cpass.set_bind_group(0, &self.simulation_pipeline.uniform.bind_group, &[]);
         cpass.set_bind_group(1, &self.simulation_pipeline.main_bg, &[]);
 
         cpass.set_pipeline(&self.simulation_pipeline.compute_start_indices);
-        cpass.dispatch_workgroups(self.current_settings.particle_count as _, 1, 1);
+        cpass.dispatch_workgroups(num_workgroups, 1, 1);
 
 
         cpass.set_pipeline(&self.simulation_pipeline.calculate_density);
-        cpass.dispatch_workgroups(self.current_settings.particle_count as _, 1, 1);
+        cpass.dispatch_workgroups(num_workgroups, 1, 1);
 
 
         cpass.set_pipeline(&self.simulation_pipeline.move_particle);
-        cpass.dispatch_workgroups(self.current_settings.particle_count as _, 1, 1);
+        cpass.dispatch_workgroups(num_workgroups, 1, 1);
 
 
         drop(cpass);
-
-        self.queue.submit(core::iter::once(encoder.finish()));
-
     }
 
 
 
-    pub fn sort_spatial_lookup(&mut self) {
+    pub fn sort_spatial_lookup(&mut self, encoder: &mut wgpu::CommandEncoder) {
         let num_pairs = self.current_settings.particle_count.next_power_of_two() / 2;
         let num_stages = (num_pairs * 2).ilog2();
 
@@ -884,15 +881,11 @@ impl Renderer {
                     group_width,
                     group_height,
                     step_index,
-                    num_values: self.spawn_settings.particle_count,
+                    num_values: self.current_settings.particle_count,
                 };
 
 
-                self.sort_pipeline.uniform.update(&self.queue, &settings);
-
-                let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("sort-command-encoder"),
-                });
+                self.sort_pipeline.uniform.update_belt(encoder, &self.device, &mut self.staging_belt, &settings);
 
                 let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: None });
                 cpass.set_pipeline(&self.sort_pipeline.pipeline);
@@ -900,19 +893,13 @@ impl Renderer {
                 cpass.set_bind_group(1, &self.particle_pipeline.spatial_lookup_bg, &[]);
                 cpass.dispatch_workgroups(num_pairs as u32, 1, 1);
                 drop(cpass);
-                self.queue.submit(core::iter::once(encoder.finish()));
             }
         }
     }
 
 
 
-    pub fn render(&mut self) {
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("render-command-encoder"),
-        });
-
-
+    pub fn render(&mut self, mut encoder: wgpu::CommandEncoder) {
         let output = self.surface.get_current_texture().unwrap();
         let view = output.texture.create_view(&TextureViewDescriptor::default());
 
@@ -939,14 +926,21 @@ impl Renderer {
             )
         }
 
+
+        let grid_w = (SIZE.x / self.current_settings.smoothing_radius).ceil() as usize;
+        let grid_h = (SIZE.y / self.current_settings.smoothing_radius).ceil() as usize;
+
+
         self.particle_pipeline.uniform.update(&self.queue, &ParticleUniform {
             projection: self.projection,
-            scale: self.spawn_settings.particle_spacing,
-            pad00: Vec3::NAN,
+            scale: self.current_settings.particle_spacing,
+            pad00: 0.0,
             colour0: conv(Vec4::new(54.0, 112.0, 255.0, 255.0) / Vec4::splat(255.0)),
             colour1: conv(Vec4::new(0.0, 225.0, 163.0, 255.0) / Vec4::splat(255.0)),
             colour2: conv(Vec4::new(205.0, 220.0, 25.0, 255.0) / Vec4::splat(255.0)),
             colour3: conv(Vec4::new(255.0, 55.0, 60.0, 255.0) / Vec4::splat(255.0)),
+            grid_size: (grid_w * grid_h) as _,
+            grid_w: grid_w as _,
 
         });
 
@@ -1263,8 +1257,8 @@ impl ParticleInstance {
                 shader_location: 4,
             },
             VertexAttribute {
-                format: wgpu::VertexFormat::Float32,
-                offset: core::mem::offset_of!(ParticleInstance, pad00) as _,
+                format: wgpu::VertexFormat::Uint32,
+                offset: core::mem::offset_of!(ParticleInstance, grid) as _,
                 shader_location: 5,
             },
         ];

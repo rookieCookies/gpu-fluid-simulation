@@ -3,7 +3,7 @@ struct ParticleInstance {
     predicted_position: vec2<f32>,
     velocity: vec2<f32>,
     density: f32,
-    pad00: f32,
+    grid: u32,
 }
 
 
@@ -33,7 +33,11 @@ struct Uniforms {
     mouse_state: i32,
     mouse_force_radius: f32,
     mouse_force_power: f32,
+
     grid_w: u32,
+    grid_h: u32,
+
+    pad: u32
 }
 
 
@@ -182,7 +186,7 @@ fn cell_of_point(point: vec2<f32>) -> u32 {
 
 
 fn xy_of_point(point: vec2<f32>) -> vec2<u32> {
-    return vec2<u32>(floor(point / u.smoothing_radius));
+    return vec2<u32>(floor((point + u.bounds*0.5) / u.smoothing_radius));
 }
 
 fn grid_pos_to_id(point: vec2<u32>) -> u32 {

@@ -1,10 +1,12 @@
 #include funcs.wgsl
 
 
-@compute @workgroup_size(1)
+@compute @workgroup_size(128)
 fn predict_next_position(
     @builtin(global_invocation_id) id: vec3<u32>,
 ) {
+    if id.x >= u.particle_count { return; }
+
     var particle = in_particles[id.x];
 
     particle.predicted_position = particle.position + particle.velocity * u.delta;
@@ -24,21 +26,25 @@ fn predict_next_position(
 }
 
 
-@compute @workgroup_size(1)
+@compute @workgroup_size(128)
 fn create_spatial_lookup(
     @builtin(global_invocation_id) id: vec3<u32>,
 ) {
+    if id.x >= u.particle_count { return; }
+
     let predicted_position = in_particles[id.x].predicted_position;
     let grid = cell_of_point(predicted_position);
     spatial_lookup[id.x].particle = id.x;
     spatial_lookup[id.x].grid = grid;
+    in_particles[id.x].grid = grid;
 }
 
 
-@compute @workgroup_size(1)
+@compute @workgroup_size(128)
 fn compute_start_indices(
     @builtin(global_invocation_id) id: vec3<u32>,
 ) {
+    if id.x >= u.particle_count { return; }
     if id.x == 0 { return; };
 
     if spatial_lookup[id.x].grid != spatial_lookup[id.x-1].grid {
@@ -47,10 +53,12 @@ fn compute_start_indices(
 }
 
 
-@compute @workgroup_size(1)
+@compute @workgroup_size(128)
 fn calculate_density(
     @builtin(global_invocation_id) gid: vec3<u32>,
 ) {
+
+    if gid.x >= u.particle_count { return; }
 
     let id = gid.x;
     var particle = in_particles[id];
@@ -65,10 +73,12 @@ fn calculate_density(
 
 
 
-@compute @workgroup_size(1)
+@compute @workgroup_size(128)
 fn move_particle(
     @builtin(global_invocation_id) gid: vec3<u32>,
 ) {
+    if gid.x >= u.particle_count { return; }
+
     let id = gid.x;
     var particle = in_particles[id];
 
@@ -124,6 +134,74 @@ fn calculate_pressure_force(particle_id: u32) -> vec2<f32> {
 
     var pressure_force = vec2<f32>(0.0);
 
+
+    // loop neighbours
+    let cell = vec2<i32>(xy_of_point(position));
+    for (var offset_y = -1; offset_y <= 1; offset_y = offset_y + 1) {
+        for (var offset_x = -1; offset_x <= 1; offset_x = offset_x + 1) {
+            let x = u32(cell.x + offset_x);
+            let y = u32(cell.y + offset_y);
+
+            if x >= u.grid_w || y >= u.grid_h { continue; }
+
+            let id = grid_pos_to_id(vec2<u32>(x, y));
+            var start_index = start_indices[id];
+
+
+            while true {
+                if start_index >= u.particle_count { break; }
+
+                let value = spatial_lookup[start_index];
+
+                if value.grid != id { break; }
+
+                let i = value.particle;
+                start_index += 1;
+
+                // func start
+                
+
+                if i == particle_id { continue; }
+
+                let neighbour = in_particles[i];
+                let neighbour_pos = neighbour.predicted_position;
+
+                let offset_to_neighbour = neighbour_pos - position;
+                let sqr_dst_to_neighbour = dot(offset_to_neighbour, offset_to_neighbour);
+
+                if sqr_dst_to_neighbour > u.sqr_radius {
+                    continue;
+                }
+
+
+                let dst = sqrt(sqr_dst_to_neighbour);
+
+                var dir_to_neighbour = vec2<f32>(0.0);
+
+                if dst == 0.0 {
+                    dir_to_neighbour = normalize(vec2<f32>(rand_f32(&rand_seed), rand_f32(&rand_seed)));
+                } else {
+                    dir_to_neighbour = offset_to_neighbour / dst;
+                }
+
+                let neighbour_density = neighbour.density;
+                let neighbour_pressure = calculate_pressure(neighbour.density);
+
+                let kernel = spiky_kernel_derivative(u.smoothing_radius, dst);
+                let shared_pressure = (pressure + neighbour_pressure) * 0.5;
+                
+                pressure_force += dir_to_neighbour * kernel * shared_pressure / neighbour_density;
+
+
+                // func end
+
+
+            }
+
+        }
+    }
+
+/*
     for (var i = 0u; i < u.particle_count; i = i + 1u) {
         if i == particle_id { continue; }
 
@@ -155,8 +233,7 @@ fn calculate_pressure_force(particle_id: u32) -> vec2<f32> {
         let shared_pressure = (pressure + neighbour_pressure) * 0.5;
         
         pressure_force += dir_to_neighbour * kernel * shared_pressure / neighbour_density;
-    }
-
+    }*/
 
     return pressure_force;
 
@@ -170,6 +247,64 @@ fn calculate_viscosity_force(particle_id: u32) -> vec2<f32> {
     let position = particle.predicted_position;
 
     var pressure_force = vec2<f32>(0.0);
+
+
+
+    // loop neighbours
+    let cell = vec2<i32>(xy_of_point(position));
+    for (var offset_y = -1; offset_y <= 1; offset_y = offset_y + 1) {
+        for (var offset_x = -1; offset_x <= 1; offset_x = offset_x + 1) {
+            let x = u32(cell.x + offset_x);
+            let y = u32(cell.y + offset_y);
+
+            if x >= u.grid_w || y >= u.grid_h { continue; }
+
+            let id = grid_pos_to_id(vec2<u32>(x, y));
+            var start_index = start_indices[id];
+
+
+            while true {
+                if start_index >= u.particle_count { break; }
+
+                let value = spatial_lookup[start_index];
+
+                if value.grid != id { break; }
+
+                let i = value.particle;
+                start_index += 1;
+
+                // func start
+
+                if i == particle_id { continue; }
+
+                let neighbour = in_particles[i];
+                let neighbour_pos = neighbour.predicted_position;
+
+                let offset_to_neighbour = neighbour_pos - position;
+                let sqr_dst_to_neighbour = dot(offset_to_neighbour, offset_to_neighbour);
+
+                if sqr_dst_to_neighbour > u.sqr_radius {
+                    continue;
+                }
+
+
+                let dst = sqrt(sqr_dst_to_neighbour);
+                let neighbour_density = neighbour.density;
+
+                let kernel = viscosity_kernel(u.smoothing_radius, dst);
+                
+                pressure_force += (neighbour.velocity - particle.velocity) / neighbour_density * kernel;
+                       
+                // func end
+
+
+            }
+
+        }
+    }
+
+
+/*
 
     for (var i = 0u; i < u.particle_count; i = i + 1u) {
         if i == particle_id { continue; }
@@ -192,7 +327,7 @@ fn calculate_viscosity_force(particle_id: u32) -> vec2<f32> {
         
         pressure_force += (neighbour.velocity - particle.velocity) / neighbour_density * kernel;
     }
-
+*/
 
     return pressure_force * u.viscosity_coefficient;
 
@@ -221,6 +356,61 @@ fn calculate_colour_field_laplacian(point: vec2<f32>) -> f32 {
     var sum = 0.0;
 
 
+    // loop neighbours
+    let cell = vec2<i32>(xy_of_point(point));
+    for (var offset_y = -1; offset_y <= 1; offset_y = offset_y + 1) {
+        for (var offset_x = -1; offset_x <= 1; offset_x = offset_x + 1) {
+            let x = u32(cell.x + offset_x);
+            let y = u32(cell.y + offset_y);
+
+            if x >= u.grid_w || y >= u.grid_h { continue; }
+
+            let id = grid_pos_to_id(vec2<u32>(x, y));
+            var start_index = start_indices[id];
+
+
+            while true {
+                if start_index >= u.particle_count { break; }
+
+                let value = spatial_lookup[start_index];
+
+                if value.grid != id { break; }
+
+                let i = value.particle;
+                start_index += 1;
+
+                // func start
+                let neighbour = in_particles[i];
+                let neighbour_pos = neighbour.predicted_position;
+
+                let offset_to_neighbour = neighbour_pos - point;
+                let sqr_dst_to_neighbour = dot(offset_to_neighbour, offset_to_neighbour);
+
+                if sqr_dst_to_neighbour > u.sqr_radius {
+                    continue;
+                }
+
+
+                let dst = sqrt(sqr_dst_to_neighbour);
+
+                var dir_to_neighbour = vec2<f32>(0.0);
+                let neighbour_density = neighbour.density;
+
+                let kernel = poly6_kernel_laplacian(u.smoothing_radius, dst);
+
+                sum += (u.particle_mass / neighbour_density) * kernel;
+
+                // func end
+
+
+            }
+
+        }
+    }
+
+
+
+/*
     for (var i = 0u; i < u.particle_count; i = i + 1u) {
         let neighbour = in_particles[i];
         let neighbour_pos = neighbour.predicted_position;
@@ -241,8 +431,10 @@ fn calculate_colour_field_laplacian(point: vec2<f32>) -> f32 {
         let kernel = poly6_kernel_laplacian(u.smoothing_radius, dst);
 
         sum += (u.particle_mass / neighbour_density) * kernel;
-    }
 
+
+    }
+*/
 
     return sum;
 }
@@ -254,6 +446,67 @@ fn calculate_colour_field_gradient(point: vec2<f32>) -> vec2<f32> {
     var sum = vec2<f32>(0.0);
 
 
+    // loop neighbours
+    let cell = vec2<i32>(xy_of_point(point));
+    for (var offset_y = -1; offset_y <= 1; offset_y = offset_y + 1) {
+        for (var offset_x = -1; offset_x <= 1; offset_x = offset_x + 1) {
+            let x = u32(cell.x + offset_x);
+            let y = u32(cell.y + offset_y);
+
+            if x >= u.grid_w || y >= u.grid_h { continue; }
+
+            let id = grid_pos_to_id(vec2<u32>(x, y));
+            var start_index = start_indices[id];
+
+
+            while true {
+                if start_index >= u.particle_count { break; }
+
+                let value = spatial_lookup[start_index];
+
+                if value.grid != id { break; }
+
+                let i = value.particle;
+                start_index += 1;
+
+                // func start
+
+                let neighbour = in_particles[i];
+                let neighbour_pos = neighbour.predicted_position;
+
+                let offset_to_neighbour = neighbour_pos - point;
+                let sqr_dst_to_neighbour = dot(offset_to_neighbour, offset_to_neighbour);
+
+                if sqr_dst_to_neighbour > u.sqr_radius {
+                    continue;
+                }
+
+
+                let dst = sqrt(sqr_dst_to_neighbour);
+
+                var dir_to_neighbour = vec2<f32>(0.0);
+                if dst == 0.0 {
+                    dir_to_neighbour = normalize(vec2<f32>(rand_f32(&rand_seed), rand_f32(&rand_seed)));
+                } else {
+                    dir_to_neighbour = offset_to_neighbour / dst;
+                }
+
+                let neighbour_density = neighbour.density;
+                let kernel = poly6_kernel_gradient(u.smoothing_radius, dir_to_neighbour);
+                
+                sum += (u.particle_mass / neighbour_density) * kernel;
+
+                // func end
+
+
+            }
+
+        }
+    }
+
+
+
+/*
     for (var i = 0u; i < u.particle_count; i = i + 1u) {
         let neighbour = in_particles[i];
         let neighbour_pos = neighbour.predicted_position;
@@ -280,7 +533,7 @@ fn calculate_colour_field_gradient(point: vec2<f32>) -> vec2<f32> {
         
         sum += (u.particle_mass / neighbour_density) * kernel;
     }
-
+*/
 
     return sum;
 
