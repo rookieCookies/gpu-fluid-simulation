@@ -4,7 +4,7 @@ use bytemuck::Pod;
 use egui_wgpu::wgpu;
 use tracing::{error, warn};
 //use egui_wgpu::{wgpu, wgpu::util::StagingBelt};
-use wgpu::util::StagingBelt;
+use wgpu::{util::StagingBelt, ShaderStages};
 
 pub struct SSBO<T> {
     pub buffer: ResizableBuffer<T>,
@@ -88,14 +88,14 @@ impl<T: Pod + std::fmt::Debug> ResizableBuffer<T> {
 
 
 impl<T: Pod + std::fmt::Debug> SSBO<T> {
-    pub fn new(name: &'static str, device: &wgpu::Device, usages: wgpu::BufferUsages, data_len: usize) -> Self {
+    pub fn new(name: &'static str, device: &wgpu::Device, usages: wgpu::BufferUsages, visibility: ShaderStages, data_len: usize) -> Self {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("GpuVec3Buffer Layout"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::COMPUTE,
+                visibility,
                 ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
                     has_dynamic_offset: false,
                     min_binding_size: None,
                 },

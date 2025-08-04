@@ -7,6 +7,12 @@ struct ParticleInstance {
 }
 
 
+struct SpatialLookupCell {
+    particle: u32,
+    grid: u32,
+}
+
+
 struct Uniforms {
     delta: f32,
     particle_count: u32,
@@ -27,7 +33,7 @@ struct Uniforms {
     mouse_state: i32,
     mouse_force_radius: f32,
     mouse_force_power: f32,
-    pad: f32
+    grid_w: u32,
 }
 
 
@@ -40,6 +46,14 @@ var<uniform> u: Uniforms;
 
 @group(1) @binding(0)
 var<storage, read_write> in_particles : array<ParticleInstance>;
+
+
+@group(1) @binding(1)
+var<storage, read_write> spatial_lookup: array<SpatialLookupCell>;
+
+
+@group(1) @binding(2)
+var<storage, read_write> start_indices: array<u32>;
 
 
 fn poly6_kernel_gradient(h: f32, r: vec2<f32>) -> vec2<f32> {
@@ -161,3 +175,16 @@ fn calculate_density_at_point(point: vec2<f32>) -> f32 {
 }
 
 
+fn cell_of_point(point: vec2<f32>) -> u32 {
+    let grid = xy_of_point(point);
+    return grid_pos_to_id(vec2<u32>(grid));
+}
+
+
+fn xy_of_point(point: vec2<f32>) -> vec2<u32> {
+    return vec2<u32>(floor(point / u.smoothing_radius));
+}
+
+fn grid_pos_to_id(point: vec2<u32>) -> u32 {
+    return point.y * u.grid_w + point.x;
+}

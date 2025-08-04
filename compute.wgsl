@@ -25,6 +25,29 @@ fn predict_next_position(
 
 
 @compute @workgroup_size(1)
+fn create_spatial_lookup(
+    @builtin(global_invocation_id) id: vec3<u32>,
+) {
+    let predicted_position = in_particles[id.x].predicted_position;
+    let grid = cell_of_point(predicted_position);
+    spatial_lookup[id.x].particle = id.x;
+    spatial_lookup[id.x].grid = grid;
+}
+
+
+@compute @workgroup_size(1)
+fn compute_start_indices(
+    @builtin(global_invocation_id) id: vec3<u32>,
+) {
+    if id.x == 0 { return; };
+
+    if spatial_lookup[id.x].grid != spatial_lookup[id.x-1].grid {
+        start_indices[spatial_lookup[id.x].grid] = id.x;
+    }
+}
+
+
+@compute @workgroup_size(1)
 fn calculate_density(
     @builtin(global_invocation_id) gid: vec3<u32>,
 ) {
