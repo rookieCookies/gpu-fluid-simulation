@@ -5,7 +5,7 @@ use egui_wgpu::{wgpu, ScreenDescriptor};
 use glam::{IVec2, IVec3, IVec4, Mat4, Vec2, Vec3, Vec4};
 use rand::Rng;
 use tracing::span;
-use wgpu::{util::{DeviceExt, StagingBelt}, BindGroup, BindGroupDescriptor, BindGroupLayout, BindGroupLayoutDescriptor, BindingType, BlasTriangleGeometry, Buffer, BufferDescriptor, BufferUsages, ComputePipeline, PollType, PrimitiveState, PrimitiveTopology, RenderPassDepthStencilAttachment, ShaderStages, TextureUsages, TextureViewDescriptor, VertexAttribute, VertexBufferLayout};
+use wgpu::{util::{DeviceExt, StagingBelt}, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, BlasTriangleGeometry, Buffer, BufferDescriptor, BufferUsages, ComputePipeline, PollType, PrimitiveState, PrimitiveTopology, RenderPassDepthStencilAttachment, ShaderStages, TextureUsages, TextureViewDescriptor, VertexAttribute, VertexBufferLayout};
 use winit::{dpi::PhysicalSize, window::{self, Window}};
 
 use crate::{buffer::{ResizableBuffer, SSBO}, egui_tools::EguiRenderer, shader::create_shader_module, uniform::Uniform};
@@ -13,7 +13,7 @@ use crate::{buffer::{ResizableBuffer, SSBO}, egui_tools::EguiRenderer, shader::c
 
 const MSAA_SAMPLE_COUNT : u32 = 1;
 const PARTICLE_SPACING : f32 = 0.125;
-const PARTICLE_COUNT : u32 = 8000;
+const PARTICLE_COUNT : u32 = 25000;
 const SIZE : Vec2 = Vec2::new(53.0, 30.0);
 
 
@@ -69,11 +69,14 @@ struct ParticleUniform {
 
 #[derive(Clone, Copy, Zeroable, Pod, Debug)]
 #[repr(C)]
+#[repr(align(256))]
 struct SortUniform {
     group_width: u32,
     group_height: u32,
     step_index: u32,
     num_values: u32,
+
+    pad: [u8; 240],
 }
 
 
@@ -168,7 +171,11 @@ pub struct SimulationPipeline {
 
 
 pub struct SortPipeline {
-    uniform: Uniform<SortUniform>,
+    uniform: ResizableBuffer<SortUniform>,
+    bgl: BindGroupLayout,
+    bg: BindGroup,
+
+
     values: SSBO<u32>,
     pipeline: ComputePipeline,
 }
@@ -588,17 +595,48 @@ impl Renderer {
             });
 
 
-            let uniform = Uniform::new("sort-uniform", &device, 0, ShaderStages::COMPUTE);
+            let uniforms = ResizableBuffer::new("sort-uniform", &device, BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST, 1);
+            let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+                label: Some("sort-uniform-bind-group-layout"),
+                entries: &[
+                    BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: ShaderStages::COMPUTE,
+                        ty: BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: true,
+                            min_binding_size: Some(NonZero::new(size_of::<SortUniform>() as u64).unwrap())
+                        },
+
+                        count: None,
+                    }
+                ]
+            });
+
+
+            let bind_group = device.create_bind_group(&BindGroupDescriptor {
+                label: Some("sort-uniform-bind-group"),
+                layout: &bind_group_layout,
+                entries: &[
+                    BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &uniforms.buffer,
+                            offset: 0,
+                            size: Some(NonZero::new(size_of::<SortUniform>() as u64).unwrap()),
+                        }),
+                    }
+                ]
+            });
 
 
             let ssbo = SSBO::new("sort-values-buffer", &device, BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST, ShaderStages::COMPUTE, 1);
 
             let rpl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("sort-pipeline-layout"),
-                bind_group_layouts: &[&uniform.bind_group_layout(), &ssbo.layout()],
+                bind_group_layouts: &[&bind_group_layout, &ssbo.layout()],
                 push_constant_ranges: &[],
             });
-
 
 
             let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -612,14 +650,16 @@ impl Renderer {
 
 
             SortPipeline {
-                uniform: uniform,
+                uniform: uniforms,
                 values: ssbo,
-                pipeline: compute_pipeline
+                pipeline: compute_pipeline,
+                bgl: bind_group_layout,
+                bg: bind_group,
             }
         };
 
 
-        let staging_belt = StagingBelt::new(256);
+        let staging_belt = StagingBelt::new(1024 * 1024);
 
 
         let egui = EguiRenderer::new(
@@ -657,7 +697,7 @@ impl Renderer {
 
             simulation_uniform: SimulationUniform {
                 delta: 1.0/120.0,
-                gravity: Vec2::new(0.0, 6.0),
+                gravity: Vec2::new(0.0, 0.0),
                 bounds: SIZE * 0.9,
 
                 particle_count: PARTICLE_COUNT as _,
@@ -665,7 +705,7 @@ impl Renderer {
                 smoothing_radius: smoothing_radius,
                 particle_mass: 1.0,
                 pressure_constant: 60.0,
-                rest_density: 90.0,
+                rest_density: 0.0,
                 damping_factor: 0.8,
                 viscosity_coefficient: 0.05,
                 surface_tension_treshold: 0.1,
@@ -808,6 +848,53 @@ impl Renderer {
         );
 
         self.queue.write_buffer(&self.particle_pipeline.instances, 0, bytemuck::cast_slice(&buf));
+
+
+
+
+        // prepare sort buffers
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("prepare-sort-buffers") });
+
+        let num_pairs = self.current_settings.particle_count.next_power_of_two() / 2;
+        let num_stages = (num_pairs * 2).ilog2();
+
+        let mut count = 0;
+        for stage_index in 0..num_stages {
+            for _ in 0..=stage_index {
+                count += 1;
+            }
+        }
+
+
+        let resized = self.sort_pipeline.uniform.resize(&self.device, &mut encoder, count);
+        if resized {
+            let bind_group = self.device.create_bind_group(&BindGroupDescriptor {
+                label: Some("sort-uniform-bind-group"),
+                layout: &self.sort_pipeline.bgl,
+                entries: &[
+                    BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &self.sort_pipeline.uniform.buffer,
+                            offset: 0,
+                            size: Some(NonZero::new(size_of::<SortUniform>() as u64).unwrap()),
+                        }),
+                    }
+                ]
+            });
+
+
+
+
+            self.sort_pipeline.bg = bind_group;
+        }
+
+
+
+
+
+        self.queue.submit(core::iter::once(encoder.finish()));
+
     }
 
 
@@ -816,15 +903,19 @@ impl Renderer {
         println!("simulataaaee");
         self.simulation_uniform.frame_time += 1;
 
-        const WORKGROUP_SIZE : u32 = 128;
+        const WORKGROUP_SIZE : u32 = 256;
         let num_workgroups = (self.current_settings.particle_count + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE;
+        dbg!(num_workgroups);
 
         self.simulation_uniform.sqr_radius = self.simulation_uniform.smoothing_radius;
         self.simulation_uniform.particle_count = self.current_settings.particle_count;
-        self.simulation_pipeline.uniform.update(&self.queue,
+        println!("update uniform");
+        self.simulation_pipeline.uniform.update(
+            &self.queue,
             &self.simulation_uniform
         );
 
+        println!("updated uniform");
 
         let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: None });
 
@@ -838,14 +929,7 @@ impl Renderer {
         cpass.set_pipeline(&self.simulation_pipeline.create_spatial_lookup);
         cpass.dispatch_workgroups(num_workgroups, 1, 1);
 
-        drop(cpass);
-
-        self.sort_spatial_lookup(encoder);
-
-
-
-        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: None });
-
+        self.sort_spatial_lookup(&mut cpass);
 
         cpass.set_bind_group(0, &self.simulation_pipeline.uniform.bind_group, &[]);
         cpass.set_bind_group(1, &self.simulation_pipeline.main_bg, &[]);
@@ -867,33 +951,46 @@ impl Renderer {
 
 
 
-    pub fn sort_spatial_lookup(&mut self, encoder: &mut wgpu::CommandEncoder) {
+    pub fn sort_spatial_lookup(&mut self, cpass: &mut wgpu::ComputePass) {
+        println!("start sorting");
         let num_pairs = self.current_settings.particle_count.next_power_of_two() / 2;
         let num_stages = (num_pairs * 2).ilog2();
+        let dispatch = num_pairs as u32 / 128;
 
 
+        let mut buf = vec![];
         for stage_index in 0..num_stages {
             for step_index in 0..=stage_index {
                 let group_width = 1 << (stage_index - step_index);
                 let group_height = 2 * group_width - 1;
+
+                if dispatch == 0 {
+                    println!("skipping because dispatch == 0");
+                }
 
                 let settings = SortUniform {
                     group_width,
                     group_height,
                     step_index,
                     num_values: self.current_settings.particle_count,
+                    pad: [0; _],
                 };
 
+                buf.push(settings);
 
-                self.sort_pipeline.uniform.update_belt(encoder, &self.device, &mut self.staging_belt, &settings);
-
-                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: None });
-                cpass.set_pipeline(&self.sort_pipeline.pipeline);
-                cpass.set_bind_group(0, &self.sort_pipeline.uniform.bind_group, &[]);
-                cpass.set_bind_group(1, &self.particle_pipeline.spatial_lookup_bg, &[]);
-                cpass.dispatch_workgroups(num_pairs as u32, 1, 1);
-                drop(cpass);
             }
+        }
+
+
+        self.queue.write_buffer(&self.sort_pipeline.uniform.buffer, 0, bytemuck::cast_slice(&buf));
+
+
+        cpass.set_pipeline(&self.sort_pipeline.pipeline);
+        cpass.set_bind_group(1, &self.particle_pipeline.spatial_lookup_bg, &[]);
+
+        for i in 0..buf.len() as u32 {
+            cpass.set_bind_group(0, &self.sort_pipeline.bg, &[i * size_of::<SortUniform>() as u32]);
+            cpass.dispatch_workgroups(dispatch, 1, 1);
         }
     }
 

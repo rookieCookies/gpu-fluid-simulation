@@ -43,8 +43,8 @@ impl<T: Pod + std::fmt::Debug> ResizableBuffer<T> {
     }
 
 
-    pub fn resize(&mut self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, new_cap: usize) {
-        if new_cap < self.len { return };
+    pub fn resize(&mut self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, new_cap: usize) -> bool {
+        if new_cap < self.len { return false };
 
         let max_cap = device.limits().max_buffer_size/size_of::<T>() as u64;
         if max_cap < new_cap as u64 {
@@ -63,6 +63,7 @@ impl<T: Pod + std::fmt::Debug> ResizableBuffer<T> {
         );
 
         *self = new_buff;
+        true
     }
 
 

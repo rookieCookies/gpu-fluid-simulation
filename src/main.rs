@@ -60,19 +60,27 @@ impl ApplicationHandler for App {
 
                 self.time_since_last_sim += dt;
 
+                renderer.staging_belt.recall();
+
                 let mut encoder = renderer.device.create_command_encoder(&CommandEncoderDescriptor {
                     label: Some("encoder"),
                 });
-
-                renderer.staging_belt.recall();
 
 
                 match self.state {
                     SimulationState::Running => {
                         if renderer.simulation_uniform.delta != 0.0 {
+                            let mut count = 0;
                             while self.time_since_last_sim > renderer.simulation_uniform.delta {
+
                                 renderer.simulate(&mut encoder);
+
                                 self.time_since_last_sim -= renderer.simulation_uniform.delta;
+                                count += 1;
+                                if count == 5 {
+                                    println!("dropped frames {}", self.time_since_last_sim/renderer.simulation_uniform.delta);
+                                    self.time_since_last_sim = 0.0;
+                                }
                             }
 
                         }

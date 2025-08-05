@@ -1,7 +1,7 @@
 #include funcs.wgsl
 
 
-@compute @workgroup_size(128)
+@compute @workgroup_size(256)
 fn predict_next_position(
     @builtin(global_invocation_id) id: vec3<u32>,
 ) {
@@ -26,7 +26,7 @@ fn predict_next_position(
 }
 
 
-@compute @workgroup_size(128)
+@compute @workgroup_size(256)
 fn create_spatial_lookup(
     @builtin(global_invocation_id) id: vec3<u32>,
 ) {
@@ -40,7 +40,7 @@ fn create_spatial_lookup(
 }
 
 
-@compute @workgroup_size(128)
+@compute @workgroup_size(256)
 fn compute_start_indices(
     @builtin(global_invocation_id) id: vec3<u32>,
 ) {
@@ -53,7 +53,7 @@ fn compute_start_indices(
 }
 
 
-@compute @workgroup_size(128)
+@compute @workgroup_size(256)
 fn calculate_density(
     @builtin(global_invocation_id) gid: vec3<u32>,
 ) {
@@ -73,7 +73,7 @@ fn calculate_density(
 
 
 
-@compute @workgroup_size(128)
+@compute @workgroup_size(256)
 fn move_particle(
     @builtin(global_invocation_id) gid: vec3<u32>,
 ) {
@@ -139,10 +139,13 @@ fn calculate_pressure_force(particle_id: u32) -> vec2<f32> {
     let cell = vec2<i32>(xy_of_point(position));
     for (var offset_y = -1; offset_y <= 1; offset_y = offset_y + 1) {
         for (var offset_x = -1; offset_x <= 1; offset_x = offset_x + 1) {
-            let x = u32(cell.x + offset_x);
-            let y = u32(cell.y + offset_y);
+            let nx = cell.x + offset_x;
+            let ny = cell.y + offset_y;
 
-            if x >= u.grid_w || y >= u.grid_h { continue; }
+            if nx < 0 || ny < 0 || nx >= i32(u.grid_w) || ny >= i32(u.grid_h) { continue; }
+
+            let x = u32(nx);
+            let y = u32(ny);
 
             let id = grid_pos_to_id(vec2<u32>(x, y));
             var start_index = start_indices[id];
