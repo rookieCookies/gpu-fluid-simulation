@@ -13,7 +13,7 @@ use crate::{buffer::{ResizableBuffer, SSBO}, egui_tools::EguiRenderer, shader::c
 
 const MSAA_SAMPLE_COUNT : u32 = 1;
 const PARTICLE_SPACING : f32 = 0.125;
-const PARTICLE_COUNT : u32 = 25000;
+const PARTICLE_COUNT : u32 = 30000;
 const SIZE : Vec2 = Vec2::new(53.0, 30.0);
 
 
@@ -747,8 +747,8 @@ impl Renderer {
 
 
     pub fn restart_simulation(&mut self) {
-        let grid_w = (SIZE.x / self.spawn_settings.smoothing_radius).ceil() as usize;
-        let grid_h = (SIZE.y / self.spawn_settings.smoothing_radius).ceil() as usize;
+        let grid_w = (SIZE.x / self.spawn_settings.smoothing_radius).ceil() as usize + 2;
+        let grid_h = (SIZE.y / self.spawn_settings.smoothing_radius).ceil() as usize + 2;
 
 
 
@@ -1024,8 +1024,8 @@ impl Renderer {
         }
 
 
-        let grid_w = (SIZE.x / self.current_settings.smoothing_radius).ceil() as usize;
-        let grid_h = (SIZE.y / self.current_settings.smoothing_radius).ceil() as usize;
+        let grid_w = (SIZE.x / self.current_settings.smoothing_radius).ceil() as usize + 2;
+        let grid_h = (SIZE.y / self.current_settings.smoothing_radius).ceil() as usize + 2;
 
 
         self.particle_pipeline.uniform.update(&self.queue, &ParticleUniform {

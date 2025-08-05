@@ -139,13 +139,8 @@ fn calculate_pressure_force(particle_id: u32) -> vec2<f32> {
     let cell = vec2<i32>(xy_of_point(position));
     for (var offset_y = -1; offset_y <= 1; offset_y = offset_y + 1) {
         for (var offset_x = -1; offset_x <= 1; offset_x = offset_x + 1) {
-            let nx = cell.x + offset_x;
-            let ny = cell.y + offset_y;
-
-            if nx < 0 || ny < 0 || nx >= i32(u.grid_w) || ny >= i32(u.grid_h) { continue; }
-
-            let x = u32(nx);
-            let y = u32(ny);
+            let x = u32(cell.x + offset_x);
+            let y = u32(cell.y + offset_y);
 
             let id = grid_pos_to_id(vec2<u32>(x, y));
             var start_index = start_indices[id];
@@ -260,8 +255,6 @@ fn calculate_viscosity_force(particle_id: u32) -> vec2<f32> {
             let x = u32(cell.x + offset_x);
             let y = u32(cell.y + offset_y);
 
-            if x >= u.grid_w || y >= u.grid_h { continue; }
-
             let id = grid_pos_to_id(vec2<u32>(x, y));
             var start_index = start_indices[id];
 
@@ -366,8 +359,6 @@ fn calculate_colour_field_laplacian(point: vec2<f32>) -> f32 {
             let x = u32(cell.x + offset_x);
             let y = u32(cell.y + offset_y);
 
-            if x >= u.grid_w || y >= u.grid_h { continue; }
-
             let id = grid_pos_to_id(vec2<u32>(x, y));
             var start_index = start_indices[id];
 
@@ -388,11 +379,6 @@ fn calculate_colour_field_laplacian(point: vec2<f32>) -> f32 {
 
                 let offset_to_neighbour = neighbour_pos - point;
                 let sqr_dst_to_neighbour = dot(offset_to_neighbour, offset_to_neighbour);
-
-                if sqr_dst_to_neighbour > u.sqr_radius {
-                    continue;
-                }
-
 
                 let dst = sqrt(sqr_dst_to_neighbour);
 
@@ -455,8 +441,6 @@ fn calculate_colour_field_gradient(point: vec2<f32>) -> vec2<f32> {
         for (var offset_x = -1; offset_x <= 1; offset_x = offset_x + 1) {
             let x = u32(cell.x + offset_x);
             let y = u32(cell.y + offset_y);
-
-            if x >= u.grid_w || y >= u.grid_h { continue; }
 
             let id = grid_pos_to_id(vec2<u32>(x, y));
             var start_index = start_indices[id];

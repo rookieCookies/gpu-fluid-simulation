@@ -186,7 +186,7 @@ fn cell_of_point(point: vec2<f32>) -> u32 {
 
 
 fn xy_of_point(point: vec2<f32>) -> vec2<u32> {
-    return vec2<u32>(floor((point + u.bounds*0.5) / u.smoothing_radius));
+    return vec2<u32>(floor((point + u.bounds*0.5) / u.smoothing_radius)) + vec2<u32>(1);
 }
 
 fn grid_pos_to_id(point: vec2<u32>) -> u32 {
