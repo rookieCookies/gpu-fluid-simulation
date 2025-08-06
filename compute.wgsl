@@ -380,6 +380,11 @@ fn calculate_colour_field_laplacian(point: vec2<f32>) -> f32 {
                 let offset_to_neighbour = neighbour_pos - point;
                 let sqr_dst_to_neighbour = dot(offset_to_neighbour, offset_to_neighbour);
 
+                if sqr_dst_to_neighbour > u.sqr_radius {
+                    continue;
+                }
+
+
                 let dst = sqrt(sqr_dst_to_neighbour);
 
                 var dir_to_neighbour = vec2<f32>(0.0);

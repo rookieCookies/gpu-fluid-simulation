@@ -1,4 +1,4 @@
-use std::{num::NonZero, sync::mpsc};
+use std::{f32::consts::PI, num::NonZero, sync::mpsc};
 
 use bytemuck::{offset_of, Pod, Zeroable};
 use egui_wgpu::{wgpu, ScreenDescriptor};
@@ -94,29 +94,36 @@ struct SpatialLookupCell {
 pub struct SimulationUniform {
     pub delta: f32,
     particle_count: u32,
-    gravity: Vec2,
-    bounds: Vec2,
     sqr_radius: f32,
     frame_time: u32,
+
+    gravity: Vec2,
+    bounds: Vec2,
+    pub mouse_pos: Vec2,
+
     smoothing_radius: f32,
     particle_mass: f32,
     pressure_constant: f32,
     rest_density: f32,
+
     damping_factor: f32,
     viscosity_coefficient: f32,
     surface_tension_treshold: f32,
     surface_tension_coefficient: f32,
+    poly6_kernel_volume: f32,
+    poly6_kernel_derivative: f32,
+    poly6_kernel_laplacian: f32,
+    spiky_kernel_derivative: f32,
+    viscosity_kernel: f32,
 
-    pub mouse_pos: Vec2,
     pub mouse_state: i32,
 
     mouse_force_radius: f32,
     mouse_force_power: f32,
 
-
     grid_w: u32,
     grid_h: u32,
-    pad: f32,
+
 }
 
 
@@ -719,9 +726,15 @@ impl Renderer {
                 mouse_pos: Vec2::ZERO,
                 mouse_state: 0,
                 frame_time: 0,
-                pad: 0.0,
                 grid_w: 0,
                 grid_h: 0,
+
+
+                poly6_kernel_volume: PI * smoothing_radius.powi(8) / 4.0,
+                poly6_kernel_derivative: PI*PI*smoothing_radius.powi(9),
+                poly6_kernel_laplacian: (945.0) / (32.0 * PI * smoothing_radius.powi(9)),
+                spiky_kernel_derivative: 12.0 / (smoothing_radius.powi(4) * PI),
+                viscosity_kernel: 15.0 / (2.0 * PI * smoothing_radius.powi(3)),
             },
         };
 
@@ -1091,7 +1104,8 @@ impl Renderer {
             egui::Window::new("spawn settings")
                 .resizable(true)
                 .vscroll(true)
-                .default_open(true)
+                .default_open(false)
+                .auto_sized()
                 .show(self.egui.context(), |ui| {
                     ui.horizontal(|ui| {
                         ui.label("particle count");
@@ -1130,7 +1144,8 @@ impl Renderer {
             egui::Window::new("simulation settings")
                 .resizable(true)
                 .vscroll(true)
-                .default_open(true)
+                .default_open(false)
+                .auto_sized()
                 .show(self.egui.context(), |ui| {
                     ui.horizontal(|ui| {
                         ui.label("delta");
