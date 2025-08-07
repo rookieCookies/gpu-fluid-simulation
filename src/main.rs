@@ -47,20 +47,26 @@ impl ApplicationHandler for App {
         let Some(renderer) = self.renderer.as_mut()
         else { return };
 
-        renderer
+        if renderer
             .egui
-            .handle_input(renderer.window, &event);
+            .handle_input(renderer.window, &event)
+            .consumed { return };
 
 
 
         match event {
             winit::event::WindowEvent::RedrawRequested => {
+                let time = Instant::now();
                 let dt = self.last_frame.elapsed().as_secs_f32();
                 self.last_frame = Instant::now();
 
                 self.time_since_last_sim += dt;
 
-                renderer.staging_belt.recall();
+                //renderer.staging_belt.recall();
+                let mut encoder = renderer.device.create_command_encoder(&CommandEncoderDescriptor {
+                    label: Some("encoder"),
+                });
+                renderer.render(encoder);
 
                 let mut encoder = renderer.device.create_command_encoder(&CommandEncoderDescriptor {
                     label: Some("encoder"),
@@ -71,18 +77,21 @@ impl ApplicationHandler for App {
                     SimulationState::Running => {
                         if renderer.simulation_uniform.delta != 0.0 {
                             let mut count = 0;
+                            let time = Instant::now();
+
                             while self.time_since_last_sim > renderer.simulation_uniform.delta {
 
                                 renderer.simulate(&mut encoder);
 
                                 self.time_since_last_sim -= renderer.simulation_uniform.delta;
                                 count += 1;
-                                if count == 5 {
+                                if count == 2 {
                                     println!("dropped frames {}", self.time_since_last_sim/renderer.simulation_uniform.delta);
                                     self.time_since_last_sim = 0.0;
                                 }
                             }
 
+                            println!("{:?}", time.elapsed());
                         }
                     },
 
@@ -94,9 +103,8 @@ impl ApplicationHandler for App {
                     SimulationState::Stopped => (),
                 };
 
+                renderer.queue.submit(core::iter::once(encoder.finish()));
 
-
-                renderer.render(encoder);
                 renderer.window.request_redraw();
             },
 

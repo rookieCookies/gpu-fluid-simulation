@@ -34,8 +34,6 @@ fn create_spatial_lookup(
 
     let predicted_position = in_particles[id.x].predicted_position;
     let grid = cell_of_point(predicted_position);
-    spatial_lookup[id.x].particle = id.x;
-    spatial_lookup[id.x].grid = grid;
     in_particles[id.x].grid = grid;
 }
 
@@ -47,8 +45,9 @@ fn compute_start_indices(
     if id.x >= u.particle_count { return; }
     if id.x == 0 { return; };
 
-    if spatial_lookup[id.x].grid != spatial_lookup[id.x-1].grid {
-        start_indices[spatial_lookup[id.x].grid] = id.x;
+    let particle = in_particles[id.x];
+    if particle.grid != in_particles[id.x-1].grid {
+        start_indices[particle.grid] = id.x;
     }
 }
 
@@ -149,11 +148,11 @@ fn calculate_pressure_force(particle_id: u32) -> vec2<f32> {
             while true {
                 if start_index >= u.particle_count { break; }
 
-                let value = spatial_lookup[start_index];
+                let neighbour = in_particles[start_index];
 
-                if value.grid != id { break; }
+                if neighbour.grid != id { break; }
 
-                let i = value.particle;
+                let i = start_index;
                 start_index += 1;
 
                 // func start
@@ -161,7 +160,6 @@ fn calculate_pressure_force(particle_id: u32) -> vec2<f32> {
 
                 if i == particle_id { continue; }
 
-                let neighbour = in_particles[i];
                 let neighbour_pos = neighbour.predicted_position;
 
                 let offset_to_neighbour = neighbour_pos - position;
@@ -262,18 +260,18 @@ fn calculate_viscosity_force(particle_id: u32) -> vec2<f32> {
             while true {
                 if start_index >= u.particle_count { break; }
 
-                let value = spatial_lookup[start_index];
 
-                if value.grid != id { break; }
+                let neighbour = in_particles[start_index];
 
-                let i = value.particle;
+                if neighbour.grid != id { break; }
+
+                let i = start_index;
                 start_index += 1;
 
                 // func start
 
                 if i == particle_id { continue; }
 
-                let neighbour = in_particles[i];
                 let neighbour_pos = neighbour.predicted_position;
 
                 let offset_to_neighbour = neighbour_pos - position;
@@ -366,15 +364,14 @@ fn calculate_colour_field_laplacian(point: vec2<f32>) -> f32 {
             while true {
                 if start_index >= u.particle_count { break; }
 
-                let value = spatial_lookup[start_index];
+                let neighbour = in_particles[start_index];
 
-                if value.grid != id { break; }
+                if neighbour.grid != id { break; }
 
-                let i = value.particle;
+                let i = start_index;
                 start_index += 1;
 
                 // func start
-                let neighbour = in_particles[i];
                 let neighbour_pos = neighbour.predicted_position;
 
                 let offset_to_neighbour = neighbour_pos - point;
@@ -454,16 +451,15 @@ fn calculate_colour_field_gradient(point: vec2<f32>) -> vec2<f32> {
             while true {
                 if start_index >= u.particle_count { break; }
 
-                let value = spatial_lookup[start_index];
+                let neighbour = in_particles[start_index];
 
-                if value.grid != id { break; }
+                if neighbour.grid != id { break; }
 
-                let i = value.particle;
+                let i = start_index;
                 start_index += 1;
 
                 // func start
 
-                let neighbour = in_particles[i];
                 let neighbour_pos = neighbour.predicted_position;
 
                 let offset_to_neighbour = neighbour_pos - point;

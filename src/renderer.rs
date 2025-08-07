@@ -1,4 +1,4 @@
-use std::{f32::consts::PI, num::NonZero, sync::mpsc};
+use std::{f32::consts::PI, num::NonZero, sync::mpsc, time::Instant};
 
 use bytemuck::{offset_of, Pod, Zeroable};
 use egui_wgpu::{wgpu, ScreenDescriptor};
@@ -12,7 +12,6 @@ use crate::{buffer::{ResizableBuffer, SSBO}, egui_tools::EguiRenderer, shader::c
 
 
 const MSAA_SAMPLE_COUNT : u32 = 1;
-const PARTICLE_SPACING : f32 = 0.125;
 const PARTICLE_COUNT : u32 = 30000;
 const SIZE : Vec2 = Vec2::new(53.0, 30.0);
 
@@ -152,7 +151,6 @@ pub struct ParticlePipeline {
     debug_render_pipeline: wgpu::RenderPipeline,
     vertices: Buffer,
     instances: Buffer,
-    spatial_lookup: Buffer,
     start_indices: Buffer,
 
 
@@ -244,7 +242,7 @@ impl Renderer {
             format: surface_format,
             width: size.width,
             height: size.height,
-            present_mode: wgpu::PresentMode::Fifo,
+            present_mode: wgpu::PresentMode::Immediate,
             alpha_mode: surface_capabilities.alpha_modes[0],
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
@@ -392,14 +390,6 @@ impl Renderer {
             });
 
 
-            let spatial_lookup = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("spatial-lookup-buffer"),
-                size: 1,
-                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
-                mapped_at_creation: false,
-            });
-
-
             let spatial_lookup_bgl = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
                 label: Some("spatial-lookup-bgl"),
                 entries: &[
@@ -423,7 +413,7 @@ impl Renderer {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: spatial_lookup.as_entire_binding(),
+                        resource: instances.as_entire_binding(),
                     },
                 ]
             });
@@ -433,10 +423,9 @@ impl Renderer {
                 render_pipeline: pipeline,
                 debug_render_pipeline: debug_pipeline,
                 vertices: vertex_buffer,
+                start_indices: instances.clone(),
                 instances,
                 uniform,
-                start_indices: spatial_lookup.clone(),
-                spatial_lookup,
                 spatial_lookup_bg,
                 spatial_lookup_bgl,
             }
@@ -460,16 +449,6 @@ impl Renderer {
                 entries: &[
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
-                        visibility: ShaderStages::COMPUTE,
-                        ty: BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: false },
-                            has_dynamic_offset: false,
-                            min_binding_size: None
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
                         visibility: ShaderStages::COMPUTE,
                         ty: BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Storage { read_only: false },
@@ -503,12 +482,8 @@ impl Renderer {
                         resource: particles.instances.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: particles.spatial_lookup.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
                         binding: 2,
-                        resource: particles.spatial_lookup.as_entire_binding(),
+                        resource: particles.instances.as_entire_binding(),
                     },
                 ],
             });
@@ -677,11 +652,12 @@ impl Renderer {
             window
         );
 
-        let smoothing_radius = PARTICLE_SPACING*2.0;
+        let spacing = 0.1;
+        let smoothing_radius = spacing*2.0;
 
         let settings = SpawnSettings {
             particle_count: PARTICLE_COUNT,
-            particle_spacing: PARTICLE_SPACING,
+            particle_spacing: spacing,
             smoothing_radius,
         };
 
@@ -772,14 +748,6 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
-        let spatial_lookup = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("spatial-lookup-buffer"),
-            size: self.spawn_settings.particle_count as u64 * size_of::<SpatialLookupCell>() as u64,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-
-
         let start_indices = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("start-indices-buffer"),
             size: (grid_w * grid_h * size_of::<u32>()) as _,
@@ -796,7 +764,7 @@ impl Renderer {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: spatial_lookup.as_entire_binding(),
+                    resource: instances.as_entire_binding(),
                 },
             ]
         });
@@ -805,9 +773,6 @@ impl Renderer {
 
         self.particle_pipeline.instances.destroy();
         self.particle_pipeline.instances = instances;
-
-        self.particle_pipeline.spatial_lookup.destroy();
-        self.particle_pipeline.spatial_lookup = spatial_lookup;
         self.particle_pipeline.spatial_lookup_bg = spatial_lookup_bg;
 
         self.particle_pipeline.start_indices.destroy();
@@ -820,10 +785,6 @@ impl Renderer {
                 wgpu::BindGroupEntry {
                     binding: 0,
                     resource: self.particle_pipeline.instances.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: self.particle_pipeline.spatial_lookup.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -913,7 +874,6 @@ impl Renderer {
 
 
     pub fn simulate(&mut self, encoder: &mut wgpu::CommandEncoder) {
-        println!("simulataaaee");
         self.simulation_uniform.frame_time += 1;
 
         const WORKGROUP_SIZE : u32 = 256;
@@ -922,13 +882,11 @@ impl Renderer {
 
         self.simulation_uniform.sqr_radius = self.simulation_uniform.smoothing_radius;
         self.simulation_uniform.particle_count = self.current_settings.particle_count;
-        println!("update uniform");
         self.simulation_pipeline.uniform.update(
             &self.queue,
             &self.simulation_uniform
         );
 
-        println!("updated uniform");
 
         let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: None });
 
@@ -965,7 +923,6 @@ impl Renderer {
 
 
     pub fn sort_spatial_lookup(&mut self, cpass: &mut wgpu::ComputePass) {
-        println!("start sorting");
         let num_pairs = self.current_settings.particle_count.next_power_of_two() / 2;
         let num_stages = (num_pairs * 2).ilog2();
         let dispatch = num_pairs as u32 / 128;
@@ -978,7 +935,7 @@ impl Renderer {
                 let group_height = 2 * group_width - 1;
 
                 if dispatch == 0 {
-                    println!("skipping because dispatch == 0");
+                    continue;
                 }
 
                 let settings = SortUniform {

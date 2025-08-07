@@ -6,13 +6,13 @@ struct Settings {
 }
 
 
-
-struct SpatialLookupCell {
-    particle: u32,
+struct ParticleInstance {
+    position: vec2<f32>,
+    predicted_position: vec2<f32>,
+    velocity: vec2<f32>,
+    density: f32,
     grid: u32,
 }
-
-
 
 
 @group(0) @binding(0)
@@ -20,7 +20,7 @@ var<storage> settings : Settings;
 
 
 @group(1) @binding(0)
-var<storage, read_write> values : array<SpatialLookupCell>;
+var<storage, read_write> values : array<ParticleInstance>;
 
 
 

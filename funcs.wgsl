@@ -58,10 +58,6 @@ var<uniform> u: Uniforms;
 var<storage, read_write> in_particles : array<ParticleInstance>;
 
 
-@group(1) @binding(1)
-var<storage, read_write> spatial_lookup: array<SpatialLookupCell>;
-
-
 @group(1) @binding(2)
 var<storage, read_write> start_indices: array<u32>;
 
