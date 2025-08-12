@@ -2,18 +2,19 @@ use std::{f32::consts::PI, num::NonZero, sync::mpsc, time::Instant};
 
 use bytemuck::{offset_of, Pod, Zeroable};
 use egui_wgpu::{wgpu, ScreenDescriptor};
-use glam::{IVec2, IVec3, IVec4, Mat4, Vec2, Vec3, Vec4};
+use glam::{IVec2, IVec3, IVec4, Mat4, UVec2, Vec2, Vec3, Vec4};
 use rand::Rng;
 use tracing::span;
-use wgpu::{util::{DeviceExt, StagingBelt}, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, BlasTriangleGeometry, Buffer, BufferDescriptor, BufferUsages, ComputePipeline, PollType, PrimitiveState, PrimitiveTopology, RenderPassDepthStencilAttachment, ShaderStages, TextureUsages, TextureViewDescriptor, VertexAttribute, VertexBufferLayout};
+use wgpu::{util::{DeviceExt, StagingBelt}, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, BlasTriangleGeometry, Buffer, BufferDescriptor, BufferUsages, ComputePipeline, Extent3d, PollType, PrimitiveState, PrimitiveTopology, RenderPassDepthStencilAttachment, Sampler, ShaderStages, Texture, TextureUsages, TextureViewDescriptor, VertexAttribute, VertexBufferLayout};
 use winit::{dpi::PhysicalSize, window::{self, Window}};
 
 use crate::{buffer::{ResizableBuffer, SSBO}, egui_tools::EguiRenderer, shader::create_shader_module, uniform::Uniform};
 
 
 const MSAA_SAMPLE_COUNT : u32 = 1;
-const PARTICLE_COUNT : u32 = 30000;
+const PARTICLE_COUNT : u32 = 20000;
 const SIZE : Vec2 = Vec2::new(53.0, 30.0);
+pub const RENDER_DIMS : UVec2 = UVec2::new(1920, 1080);
 
 
 pub struct Renderer {
@@ -24,6 +25,11 @@ pub struct Renderer {
     pub window: &'static Window,
 
     pub framebuffer: wgpu::TextureView,
+    pub depthbuffer: wgpu::TextureView,
+
+    pub offscreen_texture: wgpu::Texture,
+    pub offscreen_framebuffer: wgpu::TextureView,
+    pub offscreen_depthbuffer: wgpu::TextureView,
     pub staging_belt: StagingBelt,
 
     pub particle_pipeline: ParticlePipeline,
@@ -46,8 +52,11 @@ struct ParticleInstance {
     position: Vec2,
     predicted_position: Vec2,
     velocity: Vec2,
+
     density: f32,
     grid: u32,
+
+
 }
 
 
@@ -55,7 +64,7 @@ struct ParticleInstance {
 #[repr(C)]
 struct ParticleUniform {
     projection: Mat4,
-    pad00: f32,
+    particle_count: u32,
     scale: f32,
     grid_size: u32,
     grid_w: u32,
@@ -123,6 +132,8 @@ pub struct SimulationUniform {
     grid_w: u32,
     grid_h: u32,
 
+    pub texture_size: Vec2,
+
 }
 
 
@@ -148,10 +159,11 @@ const QUAD_VERTICES : &[ParticleVertex] = &[
 pub struct ParticlePipeline {
     uniform: Uniform<ParticleUniform>,
     render_pipeline: wgpu::RenderPipeline,
-    debug_render_pipeline: wgpu::RenderPipeline,
     vertices: Buffer,
     instances: Buffer,
     start_indices: Buffer,
+    pub texture: Buffer,
+
 
 
     spatial_lookup_bg: BindGroup,
@@ -188,7 +200,7 @@ pub struct SortPipeline {
 
 
 impl Renderer {
-    pub async fn new(window: Window) -> Self {
+    pub async fn new(window: Window, texture_size: UVec2) -> Self {
         let window = Box::leak(Box::new(window));
 
         let size = window.inner_size();
@@ -251,8 +263,6 @@ impl Renderer {
         surface.configure(&device, &config);
 
         let framebuffer = create_multisampled_framebuffer(&device, &config);
-
-
         
         let particles = {
             let shader = create_shader_module(&device, wgpu::ShaderModuleDescriptor {
@@ -315,54 +325,15 @@ impl Renderer {
                 },
 
 
-                depth_stencil: None,
-
-
-                multisample: wgpu::MultisampleState {
-                    count: MSAA_SAMPLE_COUNT,
-                    mask: !0,
-                    alpha_to_coverage_enabled: false,
-                },
-
-
-                multiview: None,
-                cache: None,
-            });
-
-
-            let debug_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("particle-debug-render-pipeline"),
-                layout: Some(&rpl),
-                vertex: wgpu::VertexState {
-                    module: &debug_shader,
-                    entry_point: Some("vs_main"),
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    buffers: &[ParticleVertex::desc(), ParticleInstance::desc()],
-                },
-
-
-                fragment: Some(wgpu::FragmentState {
-                    module: &debug_shader,
-                    entry_point: Some("fs_main"),
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    targets: &targets,
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: false,
+                    depth_compare: wgpu::CompareFunction::Always,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default()
                 }),
 
 
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    strip_index_format: None,
-                    front_face: wgpu::FrontFace::Ccw,
-                    cull_mode: None,
-                    polygon_mode: wgpu::PolygonMode::Fill,
-                    unclipped_depth: false,
-                    conservative: false,
-                },
-
-
-                depth_stencil: None,
-
-
                 multisample: wgpu::MultisampleState {
                     count: MSAA_SAMPLE_COUNT,
                     mask: !0,
@@ -373,12 +344,21 @@ impl Renderer {
                 multiview: None,
                 cache: None,
             });
+
 
 
             let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("particle-shader-quad-vertices"),
                 contents: bytemuck::cast_slice(QUAD_VERTICES),
                 usage: BufferUsages::VERTEX,
+            });
+
+
+            let texture = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("particle-texture"),
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+                size: (texture_size.x * texture_size.y * size_of::<Vec2>() as u32) as _,
+                mapped_at_creation: false,
             });
 
 
@@ -421,13 +401,13 @@ impl Renderer {
 
             ParticlePipeline {
                 render_pipeline: pipeline,
-                debug_render_pipeline: debug_pipeline,
                 vertices: vertex_buffer,
                 start_indices: instances.clone(),
                 instances,
                 uniform,
                 spatial_lookup_bg,
                 spatial_lookup_bgl,
+                texture,
             }
         };
 
@@ -458,7 +438,7 @@ impl Renderer {
                         count: None,
                     },
                     wgpu::BindGroupLayoutEntry {
-                        binding: 2,
+                        binding: 1,
                         visibility: ShaderStages::COMPUTE,
                         ty: BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Storage { read_only: false },
@@ -467,10 +447,18 @@ impl Renderer {
                         },
                         count: None,
                     },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: ShaderStages::COMPUTE,
+                        ty: BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None
+                        },
+                        count: None,
+                    },
                 ],
             });
-
-
 
 
             let main_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -482,10 +470,16 @@ impl Renderer {
                         resource: particles.instances.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
-                        binding: 2,
+                        binding: 1,
                         resource: particles.instances.as_entire_binding(),
                     },
-                ],
+ 
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: particles.texture.as_entire_binding(),
+                    },
+                ]
+                
             });
 
 
@@ -641,6 +635,60 @@ impl Renderer {
         };
 
 
+        let texture_desc = wgpu::TextureDescriptor {
+            size: wgpu::Extent3d {
+                width: RENDER_DIMS.x,
+                height: RENDER_DIMS.y,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Bgra8UnormSrgb,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            label: Some("Offscreen Render Texture"),
+            view_formats: &[],
+        };
+
+        let render_texture = device.create_texture(&texture_desc);
+
+
+
+        let texture_desc = wgpu::TextureDescriptor {
+            size: wgpu::Extent3d {
+                width: RENDER_DIMS.x,
+                height: RENDER_DIMS.y,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            label: Some("Offscreen Depth Render Texture"),
+            view_formats: &[],
+        };
+
+        let offscreen_depth_texture = device.create_texture(&texture_desc);
+
+
+        let texture_desc = wgpu::TextureDescriptor {
+            size: wgpu::Extent3d {
+                width: config.width,
+                height: config.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            label: Some("Depth Render Texture"),
+            view_formats: &[],
+        };
+
+        let depth_texture = device.create_texture(&texture_desc);
+
         let staging_belt = StagingBelt::new(1024 * 1024);
 
 
@@ -652,7 +700,7 @@ impl Renderer {
             window
         );
 
-        let spacing = 0.1;
+        let spacing = 0.4;
         let smoothing_radius = spacing*2.0;
 
         let settings = SpawnSettings {
@@ -665,9 +713,12 @@ impl Renderer {
             surface,
             device,
             queue,
-            config,
             window,
+            offscreen_framebuffer: render_texture.create_view(&wgpu::TextureViewDescriptor::default()),
+            offscreen_texture: render_texture,
+            offscreen_depthbuffer: offscreen_depth_texture.create_view(&wgpu::TextureViewDescriptor::default()),
             framebuffer,
+            depthbuffer: depth_texture.create_view(&wgpu::TextureViewDescriptor::default()),
             staging_belt,
             particle_pipeline: particles,
             simulation_pipeline: compute,
@@ -684,17 +735,18 @@ impl Renderer {
                 bounds: SIZE * 0.9,
 
                 particle_count: PARTICLE_COUNT as _,
+                texture_size: texture_size.as_vec2(),
                 sqr_radius: smoothing_radius*smoothing_radius,
                 smoothing_radius: smoothing_radius,
                 particle_mass: 1.0,
-                pressure_constant: 60.0,
+                pressure_constant: 50.0,
                 rest_density: 0.0,
-                damping_factor: 0.8,
-                viscosity_coefficient: 0.05,
+                damping_factor: 0.1,
+                viscosity_coefficient: 25.0,
                 surface_tension_treshold: 0.1,
-                surface_tension_coefficient: 100.0,
+                surface_tension_coefficient: 35.0,
                 mouse_force_radius: 5.0,
-                mouse_force_power: 1.5,
+                mouse_force_power: 150.0,
 
 
 
@@ -712,6 +764,8 @@ impl Renderer {
                 spiky_kernel_derivative: 12.0 / (smoothing_radius.powi(4) * PI),
                 viscosity_kernel: 15.0 / (2.0 * PI * smoothing_radius.powi(3)),
             },
+
+            config,
         };
 
 
@@ -787,8 +841,12 @@ impl Renderer {
                     resource: self.particle_pipeline.instances.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 2,
+                    binding: 1,
                     resource: self.particle_pipeline.start_indices.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.particle_pipeline.texture.as_entire_binding(),
                 },
             ],
         });
@@ -815,6 +873,7 @@ impl Renderer {
                 ParticleInstance {
                     position: Vec2::new(x, y),
                     predicted_position: Vec2::new(x, y),
+                    //depth: i,
                     ..Default::default()
                 }
 
@@ -878,7 +937,6 @@ impl Renderer {
 
         const WORKGROUP_SIZE : u32 = 256;
         let num_workgroups = (self.current_settings.particle_count + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE;
-        dbg!(num_workgroups);
 
         self.simulation_uniform.sqr_radius = self.simulation_uniform.smoothing_radius;
         self.simulation_uniform.particle_count = self.current_settings.particle_count;
@@ -965,6 +1023,47 @@ impl Renderer {
     }
 
 
+    pub fn render_particles(&self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, depth: &wgpu::TextureView) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("atlas-render-pass"),
+            color_attachments: &[
+                Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })
+            ],
+
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: depth,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(0.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+
+            ..Default::default()
+        });
+
+
+        pass.set_pipeline(&self.particle_pipeline.render_pipeline);
+        self.particle_pipeline.uniform.use_uniform(&mut pass);
+
+        pass.set_vertex_buffer(0, self.particle_pipeline.vertices.slice(..));
+        pass.set_vertex_buffer(1, self.particle_pipeline.instances.slice(..));
+
+        pass.draw(0..(QUAD_VERTICES.len() as _), 0..(self.current_settings.particle_count as _));
+
+        drop(pass);
+
+
+    }
+
+
 
     pub fn render(&mut self, mut encoder: wgpu::CommandEncoder) {
         let output = self.surface.get_current_texture().unwrap();
@@ -1001,50 +1100,17 @@ impl Renderer {
         self.particle_pipeline.uniform.update(&self.queue, &ParticleUniform {
             projection: self.projection,
             scale: self.current_settings.particle_spacing,
-            pad00: 0.0,
-            colour0: conv(Vec4::new(54.0, 112.0, 255.0, 255.0) / Vec4::splat(255.0)),
-            colour1: conv(Vec4::new(0.0, 225.0, 163.0, 255.0) / Vec4::splat(255.0)),
-            colour2: conv(Vec4::new(205.0, 220.0, 25.0, 255.0) / Vec4::splat(255.0)),
-            colour3: conv(Vec4::new(255.0, 55.0, 60.0, 255.0) / Vec4::splat(255.0)),
+            particle_count: self.simulation_uniform.particle_count,
+            colour0: conv(Vec4::new(25.0, 25.0, 112.0, 255.0) / Vec4::splat(255.0)),
+            colour1: conv(Vec4::new(65.0, 105.0, 225.0, 255.0) / Vec4::splat(255.0)),
+            colour2: conv(Vec4::new(100.0, 149.0, 237.0, 255.0) / Vec4::splat(255.0)),
+            colour3: conv(Vec4::new(175.0, 216.0, 230.0, 255.0) / Vec4::splat(255.0)),
             grid_size: (grid_w * grid_h) as _,
             grid_w: grid_w as _,
 
         });
 
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("atlas-render-pass"),
-            color_attachments: &[
-                Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.05, g: 0.05, b: 0.05, a: 1.0 }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })
-            ],
-
-            depth_stencil_attachment: None,
-
-            ..Default::default()
-        });
-
-
-        pass.set_pipeline(&self.particle_pipeline.render_pipeline);
-        self.particle_pipeline.uniform.use_uniform(&mut pass);
-
-        pass.set_vertex_buffer(0, self.particle_pipeline.vertices.slice(..));
-        pass.set_vertex_buffer(1, self.particle_pipeline.instances.slice(..));
-
-        pass.draw(0..(QUAD_VERTICES.len() as _), 0..(self.current_settings.particle_count as _));
-
-
-        pass.set_pipeline(&self.particle_pipeline.debug_render_pipeline);
-        pass.set_vertex_buffer(0, self.particle_pipeline.vertices.slice(..));
-        pass.draw(0..(QUAD_VERTICES.len() as _), 0..1);
-
-        drop(pass);
-
+        self.render_particles(&mut encoder, &view, &self.depthbuffer);
 
         let mut restart_sim = false;
         {
@@ -1231,6 +1297,69 @@ impl Renderer {
 
 
 
+    pub fn render_for_video(&mut self) -> Vec<u8> {
+        let width = RENDER_DIMS.x;
+        let height = RENDER_DIMS.y;
+
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("VideoRenderEncoder"),
+        });
+
+        self.render_particles(&mut encoder, &self.offscreen_framebuffer, &self.offscreen_depthbuffer);
+
+        // 4. Create a buffer to copy texture data into (RGBA8 = 4 bytes per pixel)
+        let buffer_size = (4 * width * height) as wgpu::BufferAddress;
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Readback Buffer"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        // 5. Copy texture to buffer
+        encoder.copy_texture_to_buffer(
+            wgpu::ImageCopyTexture {
+                texture: &self.offscreen_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::ImageCopyBuffer {
+                buffer: &buffer,
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * width),
+                    rows_per_image: Some(height),
+                },
+            },
+            Extent3d { width, height, depth_or_array_layers: 1 },
+        );
+
+        // 6. Submit commands
+        self.queue.submit(Some(encoder.finish()));
+
+        // Poll device until mapping is ready
+        self.device.poll(wgpu::PollType::Wait);
+
+        // Wait for buffer mapping
+        let (sender, recv) = mpsc::channel();
+        buffer.slice(..).map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
+
+        self.device.poll(wgpu::PollType::Wait);
+        
+        recv.recv().unwrap().unwrap();
+
+        let data = buffer.slice(..).get_mapped_range();
+        let pixels = data.to_vec();
+
+        drop(data);
+        buffer.unmap();
+
+        pixels
+    }
+
+
+
     pub fn window_size(&self) -> Vec2 {
         let (w, h) = (self.config.width, self.config.height);
         Vec2::new(w as _, h as _)
@@ -1242,7 +1371,6 @@ impl Renderer {
     pub fn resize_surface(&mut self, width: u32, height: u32) {
         self.config.width = width;
         self.config.height = height;
-        self.surface.configure(&self.device, &self.config);
     }
 
 }

@@ -1,6 +1,10 @@
 #include funcs.wgsl
 
 
+@group(1) @binding(2)
+var<storage> texture : array<vec2<f32>>;
+
+
 @compute @workgroup_size(256)
 fn predict_next_position(
     @builtin(global_invocation_id) id: vec3<u32>,
@@ -102,6 +106,29 @@ fn move_particle(
             particle.velocity += dir * u.mouse_force_power * f32(u.mouse_state) * ratio;
         }
     }
+
+
+    // apply the texture gradient
+    let uv = (particle.predicted_position / u.bounds*1.0) + 0.5;
+
+    let pos = vec2<u32>(uv * u.texture_size);
+    if distance(uv, vec2<f32>(0)) > 0.3 {
+        let force = texture[u32(pos.y * u32(u.texture_size.x) + pos.x)];
+        particle.velocity += force * u.mouse_force_power * u.delta;
+    }
+
+
+    if (!all(particle.velocity == particle.velocity)) {
+        // reset to something sane so it can recover
+        particle.velocity = vec2(0.0, 0.0);
+    }
+
+    let max_speed = 500.0;
+    let speed = length(particle.velocity);
+    if (speed > max_speed) {
+        particle.velocity = (particle.velocity / speed) * max_speed;
+    }
+
 
     particle.position += particle.velocity * u.delta;
 

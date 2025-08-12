@@ -19,3 +19,8 @@ rand = "0.9.2"
 egui = "0.32.0"
 egui-wgpu = { version = "0.32.0", features = ["winit"] }
 egui-winit = "0.32.0"
+
+
+ffmpeg-next = "*"
+image = "*"
+imageproc = "*"

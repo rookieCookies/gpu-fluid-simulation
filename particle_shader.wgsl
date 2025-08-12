@@ -15,14 +15,15 @@ struct Instance {
 
 struct Fragment {
     @builtin(position) position: vec4<f32>,
-    @location(0) modulate: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) modulate: vec4<f32>,
 }
 
 
 
 struct Uniforms {
     projection: mat4x4<f32>,
-    pad00: f32,
+    particle_count: u32,
     scale: f32,
     grid_size: u32,
     grid_w: u32,
@@ -42,6 +43,9 @@ fn vs_main(vertex: Vertex, instance: Instance) -> Fragment {
     var output : Fragment;
     let pos = (vertex.position * u.scale) + instance.position - u.scale * 0.5;
     output.position = u.projection * vec4<f32>(pos.x, pos.y, 0.0, 1.0);
+    //output.position.z = f32(instance.depth) / f32(u.particle_count);
+    output.uv = vertex.position;
+
 
     let step = length(instance.velocity) * 0.05;
     let grid_x = instance.grid % u.grid_w;
@@ -63,6 +67,13 @@ fn vs_main(vertex: Vertex, instance: Instance) -> Fragment {
 }
 
 @fragment
-fn fs_main(fragment: Fragment) -> @location(0) vec4<f32> {
-    return fragment.modulate;
+fn fs_main(input: Fragment) -> @location(0) vec4<f32> {
+    // Center of quad is at (0.5, 0.5), mask pixels outside radius 0.5 to discard
+    let dist = distance(input.uv, vec2<f32>(0.5, 0.5));
+    if dist > 0.5 {
+        discard;
+    }
+    let colour = vec4(input.modulate.xyz * (1.0 - dist), input.modulate.w);
+    return colour;
 }
+

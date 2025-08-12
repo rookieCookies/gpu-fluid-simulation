@@ -1,9 +1,10 @@
 struct ParticleInstance {
-    position: vec2<f32>,
-    predicted_position: vec2<f32>,
-    velocity: vec2<f32>,
-    density: f32,
-    grid: u32,
+    position: vec2<f32>, //8
+    predicted_position: vec2<f32>,//16
+    velocity: vec2<f32>,//24
+
+    density: f32,//28
+    grid: u32,//32
 }
 
 
@@ -44,6 +45,9 @@ struct Uniforms {
 
     grid_w: u32,
     grid_h: u32,
+
+    texture_size: vec2<f32>,
+
 }
 
 
@@ -58,8 +62,9 @@ var<uniform> u: Uniforms;
 var<storage, read_write> in_particles : array<ParticleInstance>;
 
 
-@group(1) @binding(2)
+@group(1) @binding(1)
 var<storage, read_write> start_indices: array<u32>;
+
 
 
 fn poly6_kernel_gradient(h: f32, r: vec2<f32>) -> vec2<f32> {
