@@ -3,6 +3,8 @@ pub mod buffer;
 pub mod uniform;
 pub mod shader;
 pub mod egui_tools;
+pub mod simulation;
+pub mod new_renderer;
 
 use std::{path::Path, time::Instant};
 
@@ -14,11 +16,18 @@ use wgpu::{hal::CommandEncoder, CommandEncoderDescriptor};
 use winit::{application::ApplicationHandler, dpi::LogicalSize, event_loop::{ActiveEventLoop, ControlFlow, EventLoop}, window::Window};
 use ffmpeg_next as ffmpeg;
 
-use crate::renderer::{Renderer, RENDER_DIMS};
+use crate::{new_renderer::OBJECT_RENDER_TEXTURE_DIMS, renderer::{Renderer, RENDER_DIMS}, simulation::SimulationSettings};
+
+enum SimulationState {
+    Running,
+    Render,
+    Step,
+    Stopped,
+}
 
 
-struct App {
-    renderer: Option<Renderer>,
+struct NewApp {
+    renderer: Option<new_renderer::Renderer>,
     state: SimulationState,
     last_frame: Instant,
     time_since_last_sim: f32,
@@ -34,26 +43,25 @@ struct App {
 }
 
 
-
-enum SimulationState {
-    Running,
-    Render,
-    Step,
-    Stopped,
-}
-
-
-
-impl ApplicationHandler for App {
+impl ApplicationHandler for NewApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let window = event_loop.create_window(Window::default_attributes().with_inner_size(LogicalSize::new(960, 540))).unwrap();
-        self.renderer = Some(pollster::block_on(Renderer::new(window, UVec2::new(self.decoder.width(), self.decoder.height()))));
+        let initial_settings = SimulationSettings {
+            particle_count: 100_000,
+            particle_spacing: 0.1,
+            smoothing_radius: 0.2,
+            size: Vec2::new(53.0, 30.0),
+            texture_size: OBJECT_RENDER_TEXTURE_DIMS,
+        };
+
+        self.renderer = Some(pollster::block_on(new_renderer::Renderer::new(window, initial_settings)));
     }
 
 
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
+
         window_id: winit::window::WindowId,
         event: winit::event::WindowEvent,
     ) {
@@ -69,7 +77,8 @@ impl ApplicationHandler for App {
 
         match event {
             winit::event::WindowEvent::RedrawRequested => {
-                let time = Instant::now();
+                renderer.device.poll(wgpu::PollType::Wait);
+
                 let elapsed = self.last_frame.elapsed();
                 let dt = elapsed.as_secs_f32();
                 self.last_frame = Instant::now();
@@ -89,7 +98,7 @@ impl ApplicationHandler for App {
 
                 match self.state {
                     SimulationState::Running => {
-                        if renderer.simulation_uniform.delta != 0.0 {
+                        if renderer.tick_settings.delta != 0.0 {
                             let packet = self.packets.next().unwrap();
                             self.decoder.send_packet(&packet.1);
 
@@ -106,14 +115,16 @@ impl ApplicationHandler for App {
                                 )
                                 .unwrap();
 
-                                let smooth = generate_smooth_gradient_field(&gray_image);
+                                //let smooth = generate_smooth_gradient_field(&gray_image);
 
 
+                                /*
                                 renderer.queue.write_buffer(
-                                    &renderer.particle_pipeline.texture,
+                                    &renderer.simulation.force_field_texture(),
                                     0,
                                     bytemuck::cast_slice(&smooth),
                                 );
+                                */
 
 
 
@@ -122,18 +133,16 @@ impl ApplicationHandler for App {
 
                             }
 
-
-                            let mut count = 0;
                             let time = Instant::now();
 
-                            while self.time_since_last_sim > renderer.simulation_uniform.delta {
+                            while self.time_since_last_sim > renderer.tick_settings.delta {
 
-                                renderer.simulate(&mut encoder);
+                                renderer.tick(&mut encoder);
 
-                                self.time_since_last_sim -= renderer.simulation_uniform.delta;
-                                count += 1;
-                                if count == 5 {
-                                    println!("dropped frames {}", self.time_since_last_sim/renderer.simulation_uniform.delta);
+                                self.time_since_last_sim -= renderer.tick_settings.delta;
+
+                                if time.elapsed().as_secs_f32() > 1.0 / 90.0 {
+                                    println!("dropped frames {}", self.time_since_last_sim/renderer.tick_settings.delta);
                                     self.time_since_last_sim = 0.0;
                                 }
                             }
@@ -167,18 +176,20 @@ impl ApplicationHandler for App {
                             )
                             .unwrap();
 
-                            let smooth = generate_smooth_gradient_field(&gray_image);
+                            //let smooth = generate_smooth_gradient_field(&gray_image);
 
                             let path = format!("output/frame_gradient{:0>5}.png", self.frame_index);
                             gray_image.save(path).unwrap();
 
 
 
+                            /*
                             renderer.queue.write_buffer(
-                                &renderer.particle_pipeline.texture,
+                                &renderer.simulation.force_field_texture(),
                                 0,
                                 bytemuck::cast_slice(&smooth),
                             );
+                            */
 
 
 
@@ -187,24 +198,26 @@ impl ApplicationHandler for App {
                         }
 
                         for _ in 0..16 {
-                            renderer.simulate(&mut encoder);
+                            renderer.tick(&mut encoder);
                         }
 
+                        /*
                         let image = renderer.render_for_video();
                         let buf : RgbaImage = ImageBuffer::from_vec(RENDER_DIMS.x, RENDER_DIMS.y, image).unwrap();
                         let path = format!("output/frame_{:0>5}.png", self.frame_index);
                         buf.save(path).unwrap();
 
                         let elapsed = self.start.elapsed();
-                        let time = elapsed.div_f64(self.frame_index as f64).min(1.0);
+                        let time = elapsed.div_f64((self.frame_index as f64).min(1.0));
                         let time = time.mul_f64(self.max_frame_count as f64);
                         let time = time - elapsed;
                         println!("saved frame {}/{}, elapsed: {:?}, estimate left: {:?}", self.frame_index, self.max_frame_count, elapsed, time);
+                        */
 
                     }
 
                     SimulationState::Step => {
-                        renderer.simulate(&mut encoder);
+                        renderer.tick(&mut encoder);
                         self.state = SimulationState::Stopped;
                     },
 
@@ -263,10 +276,10 @@ impl ApplicationHandler for App {
             winit::event::WindowEvent::MouseInput { device_id, state, button } => {
                 let renderer = self.renderer.as_mut().unwrap();
                 match (state, button) {
-                    (winit::event::ElementState::Pressed, winit::event::MouseButton::Left) => renderer.simulation_uniform.mouse_state = -1,
-                    (winit::event::ElementState::Pressed, winit::event::MouseButton::Right) => renderer.simulation_uniform.mouse_state = 1,
-                    (winit::event::ElementState::Released, winit::event::MouseButton::Left) => renderer.simulation_uniform.mouse_state = 0,
-                    (winit::event::ElementState::Released, winit::event::MouseButton::Right) => renderer.simulation_uniform.mouse_state = 0,
+                    (winit::event::ElementState::Pressed, winit::event::MouseButton::Left) => renderer.tick_settings.mouse_state = -1,
+                    (winit::event::ElementState::Pressed, winit::event::MouseButton::Right) => renderer.tick_settings.mouse_state = 1,
+                    (winit::event::ElementState::Released, winit::event::MouseButton::Left) => renderer.tick_settings.mouse_state = 0,
+                    (winit::event::ElementState::Released, winit::event::MouseButton::Right) => renderer.tick_settings.mouse_state = 0,
                     _ => (),
                 }
             }
@@ -287,7 +300,7 @@ impl ApplicationHandler for App {
                 let world_pos = world_pos.truncate() / world_pos.w;
                 let world_pos = world_pos.truncate();
 
-                renderer.simulation_uniform.mouse_pos = world_pos;
+                renderer.tick_settings.mouse_pos = world_pos;
             }
 
 
@@ -304,6 +317,10 @@ impl ApplicationHandler for App {
 
 
 }
+
+
+
+
 
 
 
@@ -342,7 +359,7 @@ fn main() {
     let frame_count = input_stream.frames();
 
 
-    let mut app = App {
+    let mut app = NewApp {
         renderer: None,
         state: SimulationState::Stopped,
         last_frame: Instant::now(),
@@ -360,21 +377,44 @@ fn main() {
 }
 
 
+struct Image<'a> {
+    data: &'a [u8],
+    width: u32,
+    height: u32,
+}
 
-fn generate_smooth_gradient_field(img: &GrayImage) -> Vec<Vec2>{
-    let width = img.width() as usize;
-    let height = img.height() as usize;
+
+impl<'a> Image<'a> {
+    pub fn new(data: &'a [u8], width: u32, height: u32) -> Self {
+        Self {
+            data,
+            width,
+            height,
+        }
+    }
+
+
+    pub fn get_pixel(&self, x: u32, y: u32) -> u8 {
+        self.data[(y*self.width+x) as usize]
+    }
+}
+
+
+
+fn generate_smooth_gradient_field(img: Image) -> Vec<Vec2> {
+    let height = img.height as usize;
+    let width = img.width as usize;
 
     // Distance buffer, initialized to a large value
-    let mut dist = vec![vec![f32::MAX; width]; height];
+    let mut dist = vec![vec![f32::MAX; img.width as _]; img.height as _];
     // Nearest source pixel coords for each pixel
-    let mut nearest = vec![vec![(0usize, 0usize); width]; height];
+    let mut nearest = vec![vec![(0usize, 0usize); img.width as _]; img.height as usize];
 
     // Step 1: Initialization
     let mut has_white = false;
     for y in 0..height {
         for x in 0..width {
-            if img.get_pixel(x as u32, y as u32)[0] > 128 {
+            if img.get_pixel(x as u32, y as u32) > 128 {
                 dist[y][x] = 0.0;
                 nearest[y][x] = (x, y);
                 has_white = true;
@@ -451,29 +491,28 @@ fn generate_smooth_gradient_field(img: &GrayImage) -> Vec<Vec2>{
     }
 
     // Create RGB image for gradient visualization
-    let mut rgb_img = vec![Vec2::ZERO; width*height];
+    let mut gradient_field = vec![Vec2::ZERO; width * height];
 
     for y in 0..height {
         for x in 0..width {
-            let (nx, ny) = nearest[y][x];
-            let dir_x = nx as f32 - x as f32;
-            let dir_y = ny as f32 - y as f32;
+            let (source_x, source_y) = nearest[y][x];
 
-            // Normalize direction vector
-            let length = (dir_x * dir_x + dir_y * dir_y).sqrt().max(1e-5);
-            let nx = dir_x / length;
-            let ny = dir_y / length;
+            // 1. REVERSE SUBTRACTION: Vector from source TO pixel (points away)
+            let dir_x = x as f32 - source_x as f32;
+            let dir_y = y as f32 - source_y as f32;
 
+            // 2. NORMALIZE: Calculate the length and divide by it
+            let length = (dir_x * dir_x + dir_y * dir_y).sqrt();
 
-            // Scale by distance with some smoothing, clamp max to 1.0
-            let scale = (1.0 - (length / 100.0).clamp(0.5, 1.0));
+            let grad_x = if length > 1e-6 { dir_x } else { 0.0 };
+            let grad_y = if length > 1e-6 { dir_y } else { 0.0 };
 
-            // Map from [-1, 1] to [0, 255]
-            rgb_img[y*width+x] = Vec2::new(nx, ny) * scale;
+            gradient_field[y * width + x] = -Vec2::new(grad_x, grad_y);
         }
     }
 
-    rgb_img
+
+    gradient_field
 }
 
 

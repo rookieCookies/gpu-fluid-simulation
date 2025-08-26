@@ -2,6 +2,7 @@ use std::{f32::consts::PI, num::NonZero, sync::mpsc, time::Instant};
 
 use bytemuck::{offset_of, Pod, Zeroable};
 use egui_wgpu::{wgpu, ScreenDescriptor};
+use ffmpeg_next::ffi::SSIZE_MAX;
 use glam::{IVec2, IVec3, IVec4, Mat4, UVec2, Vec2, Vec3, Vec4};
 use rand::Rng;
 use tracing::span;
@@ -12,7 +13,7 @@ use crate::{buffer::{ResizableBuffer, SSBO}, egui_tools::EguiRenderer, shader::c
 
 
 const MSAA_SAMPLE_COUNT : u32 = 1;
-const PARTICLE_COUNT : u32 = 20000;
+const PARTICLE_COUNT : u32 = 100_000;
 const SIZE : Vec2 = Vec2::new(53.0, 30.0);
 pub const RENDER_DIMS : UVec2 = UVec2::new(1920, 1080);
 
@@ -33,6 +34,7 @@ pub struct Renderer {
     pub staging_belt: StagingBelt,
 
     pub particle_pipeline: ParticlePipeline,
+    pub fluid_pipeline: FluidRenderPipeline,
     pub simulation_pipeline: SimulationPipeline,
     pub sort_pipeline: SortPipeline,
     pub egui: EguiRenderer,
@@ -44,21 +46,6 @@ pub struct Renderer {
     pub spawn_settings: SpawnSettings,
     pub current_settings: SpawnSettings,
 }
-
-
-#[derive(Clone, Copy, Zeroable, Pod, Default, Debug)]
-#[repr(C)]
-struct ParticleInstance {
-    position: Vec2,
-    predicted_position: Vec2,
-    velocity: Vec2,
-
-    density: f32,
-    grid: u32,
-
-
-}
-
 
 #[derive(Clone, Copy, Zeroable, Pod, Debug)]
 #[repr(C)]
@@ -92,6 +79,27 @@ struct SortUniform {
 #[repr(C)]
 struct SpatialLookupCell {
     particle: u32,
+    grid: u32,
+}
+
+
+
+#[derive(Clone)]
+pub struct SpawnSettings {
+    particle_count: u32,
+    particle_spacing: f32,
+    smoothing_radius: f32,
+}
+
+
+#[derive(Clone, Copy, Zeroable, Pod, Default, Debug)]
+#[repr(C)]
+struct ParticleInstance {
+    position: Vec2,
+    predicted_position: Vec2,
+    velocity: Vec2,
+
+    density: f32,
     grid: u32,
 }
 
@@ -132,16 +140,8 @@ pub struct SimulationUniform {
     grid_w: u32,
     grid_h: u32,
 
-    pub texture_size: Vec2,
+    texture_size: Vec2,
 
-}
-
-
-#[derive(Clone)]
-pub struct SpawnSettings {
-    particle_count: u32,
-    particle_spacing: f32,
-    smoothing_radius: f32,
 }
 
 
@@ -165,14 +165,19 @@ pub struct ParticlePipeline {
     pub texture: Buffer,
 
 
-
     spatial_lookup_bg: BindGroup,
     spatial_lookup_bgl: BindGroupLayout,
 }
 
 
+pub struct FluidRenderPipeline {
+    uniform: Uniform<Mat4>,
+    render_pipeline: wgpu::RenderPipeline,
+    vertices: Buffer,
+}
+
+
 pub struct SimulationPipeline {
-    compute_pipeline: Box<[ComputePipeline]>,
     uniform: Uniform<SimulationUniform>,
     main_bgl: BindGroupLayout,
     main_bg: BindGroup,
@@ -225,7 +230,8 @@ impl Renderer {
 
         let (device, queue) = adapter.request_device(
             &wgpu::DeviceDescriptor {
-                required_features: wgpu::Features::empty(),
+                required_features: wgpu::Features::empty()
+                    | wgpu::Features::VERTEX_WRITABLE_STORAGE,
                 required_limits: {
                     let mut limits = wgpu::Limits::downlevel_defaults();
                     limits.max_buffer_size = adapter.limits().max_buffer_size;
@@ -269,11 +275,6 @@ impl Renderer {
                 label: Some("particle-shader"),
                 source: wgpu::ShaderSource::Wgsl(include_str!("../particle_shader.wgsl").into()),
             });
-            let debug_shader = create_shader_module(&device, wgpu::ShaderModuleDescriptor {
-                label: Some("debug-shader"),
-                source: wgpu::ShaderSource::Wgsl(include_str!("../debug.wgsl").into()),
-            });
-
 
 
             let uniform = Uniform::new("particle-uniform", &device, 0, wgpu::ShaderStages::VERTEX_FRAGMENT);
@@ -421,7 +422,7 @@ impl Renderer {
 
 
 
-            let uniform = Uniform::new("compute-uniform", &device, 0, ShaderStages::COMPUTE);
+            let uniform = Uniform::new("compute-uniform", &device, 0, ShaderStages::COMPUTE | ShaderStages::VERTEX_FRAGMENT);
 
 
             let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
@@ -429,7 +430,7 @@ impl Renderer {
                 entries: &[
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
-                        visibility: ShaderStages::COMPUTE,
+                        visibility: ShaderStages::COMPUTE | ShaderStages::VERTEX_FRAGMENT,
                         ty: BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Storage { read_only: false },
                             has_dynamic_offset: false,
@@ -439,7 +440,7 @@ impl Renderer {
                     },
                     wgpu::BindGroupLayoutEntry {
                         binding: 1,
-                        visibility: ShaderStages::COMPUTE,
+                        visibility: ShaderStages::COMPUTE | ShaderStages::VERTEX_FRAGMENT,
                         ty: BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Storage { read_only: false },
                             has_dynamic_offset: false,
@@ -449,7 +450,7 @@ impl Renderer {
                     },
                     wgpu::BindGroupLayoutEntry {
                         binding: 2,
-                        visibility: ShaderStages::COMPUTE,
+                        visibility: ShaderStages::COMPUTE | ShaderStages::VERTEX_FRAGMENT,
                         ty: BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Storage { read_only: true },
                             has_dynamic_offset: false,
@@ -501,49 +502,9 @@ impl Renderer {
                     cache: None,
                 })
             };
-            let compute_pipeline = Box::new([
-                
-                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some("compute-pipeline"),
-                    layout: Some(&rpl),
-                    module: &shader,
-                    entry_point: Some("predict_next_position"),
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    cache: None,
-                }),
-                
-                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some("compute-pipeline"),
-                    layout: Some(&rpl),
-                    module: &shader,
-                    entry_point: Some("create_spatial_lookup"),
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    cache: None,
-                }),
-                
-                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some("compute-pipeline"),
-                    layout: Some(&rpl),
-                    module: &shader,
-                    entry_point: Some("calculate_density"),
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    cache: None,
-                }),
-                
-                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some("compute-pipeline"),
-                    layout: Some(&rpl),
-                    module: &shader,
-                    entry_point: Some("move_particle"),
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    cache: None,
-                }),
-            ]);
 
 
             SimulationPipeline {
-
-                compute_pipeline,
                 main_bg: main_bind_group,
                 uniform,
                 main_bgl: bind_group_layout,
@@ -554,9 +515,93 @@ impl Renderer {
                 compute_start_indices: create_compute_pipeline("compute_start_indices"),
                 calculate_density: create_compute_pipeline("calculate_density"),
                 move_particle: create_compute_pipeline("move_particle"),
+            }
+        };
+
+
+        let fluid_pipeline = {
+            let shader = create_shader_module(&device, wgpu::ShaderModuleDescriptor {
+                label: Some("fluid-shader"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("../fluid_shader.wgsl").into()),
+            });
+
+
+            let uniform = Uniform::new("fluid-shader-inv-proj", &device, 0, wgpu::ShaderStages::VERTEX_FRAGMENT);
+
+
+            let rpl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("particle-render-pipeline-layout"),
+                bind_group_layouts: &[compute.uniform.bind_group_layout(), &compute.main_bgl, &uniform.bind_group_layout()],
+                push_constant_ranges: &[],
+            });
+
+
+            let targets = [Some(wgpu::ColorTargetState {
+                format: config.format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })];
 
 
 
+
+            let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("fluid-render-pipeline"),
+                layout: Some(&rpl),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    buffers: &[ParticleVertex::desc()],
+                },
+
+
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    targets: &targets,
+                }),
+
+
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+
+
+                depth_stencil: None,
+
+
+                multisample: wgpu::MultisampleState {
+                    count: MSAA_SAMPLE_COUNT,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+
+
+                multiview: None,
+                cache: None,
+            });
+
+
+
+            let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("fluid-shader-quad-vertices"),
+                contents: bytemuck::cast_slice(QUAD_VERTICES),
+                usage: BufferUsages::VERTEX,
+            });
+
+
+            FluidRenderPipeline {
+                uniform,
+                render_pipeline: pipeline,
+                vertices: vertex_buffer,
             }
         };
 
@@ -700,7 +745,7 @@ impl Renderer {
             window
         );
 
-        let spacing = 0.4;
+        let spacing = 0.1;
         let smoothing_radius = spacing*2.0;
 
         let settings = SpawnSettings {
@@ -721,6 +766,7 @@ impl Renderer {
             depthbuffer: depth_texture.create_view(&wgpu::TextureViewDescriptor::default()),
             staging_belt,
             particle_pipeline: particles,
+            fluid_pipeline,
             simulation_pipeline: compute,
             sort_pipeline: sort,
             egui,
@@ -1024,6 +1070,42 @@ impl Renderer {
 
 
     pub fn render_particles(&self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, depth: &wgpu::TextureView) {
+
+        self.simulation_pipeline.uniform.update(&self.queue, &self.simulation_uniform);
+        self.fluid_pipeline.uniform.update(&self.queue, &self.projection.inverse());
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("fluid-render-pass"),
+            color_attachments: &[
+                Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })
+            ],
+
+            depth_stencil_attachment: None,
+
+            ..Default::default()
+        });
+
+
+        pass.set_pipeline(&self.fluid_pipeline.render_pipeline);
+        pass.set_bind_group(0, &self.simulation_pipeline.uniform.bind_group, &[]);
+        pass.set_bind_group(1, &self.simulation_pipeline.main_bg, &[]);
+        pass.set_bind_group(2, &self.fluid_pipeline.uniform.bind_group, &[]);
+
+        pass.set_vertex_buffer(0, self.fluid_pipeline.vertices.slice(..));
+
+        pass.draw(0..(QUAD_VERTICES.len() as _), 0..1);
+
+        drop(pass);
+
+
+        /*
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("atlas-render-pass"),
             color_attachments: &[
@@ -1031,7 +1113,7 @@ impl Renderer {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }),
+                        load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
                     },
                 })
@@ -1059,7 +1141,7 @@ impl Renderer {
         pass.draw(0..(QUAD_VERTICES.len() as _), 0..(self.current_settings.particle_count as _));
 
         drop(pass);
-
+        */
 
     }
 
@@ -1430,30 +1512,31 @@ impl ParticleVertex {
     }
 }
 
+
 impl ParticleInstance {
-    fn desc() -> VertexBufferLayout<'static> {
-        const ATTRS : &[VertexAttribute] = &[
-            VertexAttribute {
+    fn desc() -> wgpu::VertexBufferLayout<'static> {
+        const ATTRS : &[wgpu::VertexAttribute] = &[
+            wgpu::VertexAttribute {
                 format: wgpu::VertexFormat::Float32x2,
                 offset: core::mem::offset_of!(ParticleInstance, position) as _,
                 shader_location: 1,
             },
-            VertexAttribute {
+            wgpu::VertexAttribute {
                 format: wgpu::VertexFormat::Float32x2,
                 offset: core::mem::offset_of!(ParticleInstance, predicted_position) as _,
                 shader_location: 2,
             },
-            VertexAttribute {
+            wgpu::VertexAttribute {
                 format: wgpu::VertexFormat::Float32x2,
                 offset: core::mem::offset_of!(ParticleInstance, velocity) as _,
                 shader_location: 3,
             },
-            VertexAttribute {
+            wgpu::VertexAttribute {
                 format: wgpu::VertexFormat::Float32,
                 offset: core::mem::offset_of!(ParticleInstance, density) as _,
                 shader_location: 4,
             },
-            VertexAttribute {
+            wgpu::VertexAttribute {
                 format: wgpu::VertexFormat::Uint32,
                 offset: core::mem::offset_of!(ParticleInstance, grid) as _,
                 shader_location: 5,

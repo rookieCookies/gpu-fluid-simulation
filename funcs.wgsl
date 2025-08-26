@@ -67,41 +67,35 @@ var<storage, read_write> start_indices: array<u32>;
 
 
 
-fn poly6_kernel_gradient(h: f32, r: vec2<f32>) -> vec2<f32> {
-    return poly6_kernel_derivative(h, length(r)) * normalize(r);
-}
 
-
-fn poly6_kernel_derivative(h: f32, dst: f32) -> f32 {
-    if dst >= h { return 0.0; }
-
-    let a = 24.0*(2.0*h-2.0*dst);
-    let b = u.poly6_kernel_derivative;
-    return a / b;
-}
-
-
-fn poly6_kernel_laplacian(h: f32, r: f32) -> f32 {
-    if r <= h {
-        let constant = u.poly6_kernel_laplacian;
-        return constant * (h*h-r*r)*(3.0*h*h-7.0*r*r);
-    } else {
-        return 0.0;
-    }
-}
-
-
+// Poly6 kernel (scalar)
 fn poly6_kernel(h: f32, r2: f32) -> f32 {
-    let h2 = u.smoothing_radius * u.smoothing_radius;
-    if r2 > h2 {
-        return 0.0;
-    }
-
-    let volume = u.poly6_kernel_volume;
+    let h2 = h * h;
+    if r2 > h2 { return 0.0; }
     let diff = h2 - r2;
-    return diff*diff*diff / volume;
+    let poly6_norm = 4.0 / (PI * pow(h, 8.0));
+    return poly6_norm * diff * diff * diff;
 }
 
+// Poly6 gradient (vector)
+fn poly6_kernel_gradient(h: f32, r: vec2<f32>) -> vec2<f32> {
+    let r_len = length(r);
+    if r_len >= h || r_len == 0.0 { return vec2<f32>(0.0, 0.0); }
+
+    let diff2 = h*h - r_len*r_len;
+    let constant = -24.0 / (PI * pow(h, 8.0));
+    return constant * diff2 * diff2 * r;
+}
+
+// Poly6 Laplacian (scalar)
+fn poly6_kernel_laplacian(h: f32, r: f32) -> f32 {
+    if r > h { return 0.0; }
+
+    let h2 = h * h;
+    let r2 = r * r;
+    let constant = 8.0 / (PI * pow(h, 8.0));
+    return constant * (h2 - r2) * (3.0*h2 - 4.0*r2);
+}
 
 
 fn spiky_kernel_derivative(h: f32, r: f32) -> f32 {
@@ -163,18 +157,46 @@ fn calculate_pressure(density: f32) -> f32 {
 fn calculate_density_at_point(point: vec2<f32>) -> f32 {
     var density = 0.0;
 
-    for (var i = 0u; i < u.particle_count; i = i + 1u) {
+    let cell = vec2<i32>(xy_of_point(point));
+    for (var offset_y = -3; offset_y <= 3; offset_y = offset_y + 1) {
+        for (var offset_x = -3; offset_x <= 3; offset_x = offset_x + 1) {
+            let x = u32(cell.x + offset_x);
+            let y = u32(cell.y + offset_y);
 
-        let neighbour = in_particles[i];
-        let neighbour_pos = neighbour.predicted_position;
+            let id = grid_pos_to_id(vec2<u32>(x, y));
+            var start_index = start_indices[id];
 
-        let offset_to_neighbour = neighbour_pos - point;
-        let sqr_dst_to_neighbour = dot(offset_to_neighbour, offset_to_neighbour);
 
-        let dst = sqr_dst_to_neighbour;
+            while true {
+                if start_index >= u.particle_count { break; }
 
-        let kernel = poly6_kernel(u.smoothing_radius, dst);
-        density += u.particle_mass * kernel;
+                let neighbour = in_particles[start_index];
+
+                if neighbour.grid != id { break; }
+
+                let i = start_index;
+                start_index += 1;
+
+                // func start
+
+                let neighbour_pos = neighbour.predicted_position;
+
+                let offset_to_neighbour = neighbour_pos - point;
+                let sqr_dst_to_neighbour = dot(offset_to_neighbour, offset_to_neighbour);
+
+                let dst = sqr_dst_to_neighbour;
+
+                let kernel = poly6_kernel(u.smoothing_radius, dst);
+                var mul: f32 = 1.0;
+
+                density += u.particle_mass * kernel * mul;
+
+                // func end
+
+
+            }
+
+        }
     }
 
     return max(density, EPSILON);

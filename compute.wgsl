@@ -89,8 +89,8 @@ fn move_particle(
 
     let pressure = calculate_pressure_force(id);
     let viscosity = calculate_viscosity_force(id);
-    let surface_tension = calculate_surface_tension(particle.predicted_position);
-    let acceleration = pressure + viscosity + surface_tension;
+    //let surface_tension = calculate_surface_tension(particle.predicted_position);
+    let acceleration = pressure + viscosity;
    
     particle.velocity += (acceleration / particle.density) * u.delta;
     particle.velocity += u.gravity * u.delta;
@@ -108,14 +108,6 @@ fn move_particle(
     }
 
 
-    // apply the texture gradient
-    let uv = (particle.predicted_position / u.bounds*1.0) + 0.5;
-
-    let pos = vec2<u32>(uv * u.texture_size);
-    if distance(uv, vec2<f32>(0)) > 0.3 {
-        let force = texture[u32(pos.y * u32(u.texture_size.x) + pos.x)];
-        particle.velocity += force * u.mouse_force_power * u.delta;
-    }
 
 
     if (!all(particle.velocity == particle.velocity)) {
@@ -131,6 +123,21 @@ fn move_particle(
 
 
     particle.position += particle.velocity * u.delta;
+
+    let uv = (particle.predicted_position / u.bounds*1.0) + 0.5;
+    let pos = vec2<u32>(uv * u.texture_size);
+    let force = texture[u32(pos.y * u32(u.texture_size.x) + pos.x)];
+
+    let pixel_to_world = (u.bounds * 2.0) / vec2<f32>(u.texture_size);
+    let force_world = vec2<f32>(force) * pixel_to_world;
+
+    if force.x != 0 || force.y != 0 { 
+        let n = normalize(force);
+        particle.position += force_world;
+        let vn = dot(particle.velocity, n);
+        particle.velocity -= (1.0 - u.damping_factor) * vn * n;
+
+    }
 
 
     let bounds_size = u.bounds * 0.5;
@@ -224,43 +231,7 @@ fn calculate_pressure_force(particle_id: u32) -> vec2<f32> {
         }
     }
 
-/*
-    for (var i = 0u; i < u.particle_count; i = i + 1u) {
-        if i == particle_id { continue; }
-
-        let neighbour = in_particles[i];
-        let neighbour_pos = neighbour.predicted_position;
-
-        let offset_to_neighbour = neighbour_pos - position;
-        let sqr_dst_to_neighbour = dot(offset_to_neighbour, offset_to_neighbour);
-
-        if sqr_dst_to_neighbour > u.sqr_radius {
-            continue;
-        }
-
-
-        let dst = sqrt(sqr_dst_to_neighbour);
-
-        var dir_to_neighbour = vec2<f32>(0.0);
-
-        if dst == 0.0 {
-            dir_to_neighbour = normalize(vec2<f32>(rand_f32(&rand_seed), rand_f32(&rand_seed)));
-        } else {
-            dir_to_neighbour = offset_to_neighbour / dst;
-        }
-
-        let neighbour_density = neighbour.density;
-        let neighbour_pressure = calculate_pressure(neighbour.density);
-
-        let kernel = spiky_kernel_derivative(u.smoothing_radius, dst);
-        let shared_pressure = (pressure + neighbour_pressure) * 0.5;
-        
-        pressure_force += dir_to_neighbour * kernel * shared_pressure / neighbour_density;
-    }*/
-
     return pressure_force;
-
-
 }
 
 
@@ -324,35 +295,7 @@ fn calculate_viscosity_force(particle_id: u32) -> vec2<f32> {
         }
     }
 
-
-/*
-
-    for (var i = 0u; i < u.particle_count; i = i + 1u) {
-        if i == particle_id { continue; }
-
-        let neighbour = in_particles[i];
-        let neighbour_pos = neighbour.predicted_position;
-
-        let offset_to_neighbour = neighbour_pos - position;
-        let sqr_dst_to_neighbour = dot(offset_to_neighbour, offset_to_neighbour);
-
-        if sqr_dst_to_neighbour > u.sqr_radius {
-            continue;
-        }
-
-
-        let dst = sqrt(sqr_dst_to_neighbour);
-        let neighbour_density = neighbour.density;
-
-        let kernel = viscosity_kernel(u.smoothing_radius, dst);
-        
-        pressure_force += (neighbour.velocity - particle.velocity) / neighbour_density * kernel;
-    }
-*/
-
     return pressure_force * u.viscosity_coefficient;
-
-
 }
 
 
