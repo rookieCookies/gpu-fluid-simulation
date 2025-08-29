@@ -4,7 +4,6 @@ pub mod uniform;
 pub mod shader;
 pub mod egui_tools;
 pub mod simulation;
-pub mod new_renderer;
 
 use std::{path::Path, time::Instant};
 
@@ -16,7 +15,7 @@ use wgpu::{hal::CommandEncoder, CommandEncoderDescriptor};
 use winit::{application::ApplicationHandler, dpi::LogicalSize, event_loop::{ActiveEventLoop, ControlFlow, EventLoop}, window::Window};
 use ffmpeg_next as ffmpeg;
 
-use crate::{new_renderer::OBJECT_RENDER_TEXTURE_DIMS, renderer::{Renderer, RENDER_DIMS}, simulation::SimulationSettings};
+use crate::{renderer::OBJECT_RENDER_TEXTURE_DIMS, renderer::{Renderer, RENDER_DIMS}, simulation::SimulationSettings};
 
 enum SimulationState {
     Running,
@@ -26,8 +25,8 @@ enum SimulationState {
 }
 
 
-struct NewApp {
-    renderer: Option<new_renderer::Renderer>,
+struct App {
+    renderer: Option<renderer::Renderer>,
     state: SimulationState,
     last_frame: Instant,
     time_since_last_sim: f32,
@@ -43,18 +42,18 @@ struct NewApp {
 }
 
 
-impl ApplicationHandler for NewApp {
+impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let window = event_loop.create_window(Window::default_attributes().with_inner_size(LogicalSize::new(960, 540))).unwrap();
         let initial_settings = SimulationSettings {
             particle_count: 100_000,
             particle_spacing: 0.1,
             smoothing_radius: 0.2,
-            size: Vec2::new(53.0, 30.0),
+            size: Vec2::new(53.0, 53.0),
             texture_size: OBJECT_RENDER_TEXTURE_DIMS,
         };
 
-        self.renderer = Some(pollster::block_on(new_renderer::Renderer::new(window, initial_settings)));
+        self.renderer = Some(pollster::block_on(renderer::Renderer::new(window, initial_settings)));
     }
 
 
@@ -359,7 +358,7 @@ fn main() {
     let frame_count = input_stream.frames();
 
 
-    let mut app = NewApp {
+    let mut app = App {
         renderer: None,
         state: SimulationState::Stopped,
         last_frame: Instant::now(),

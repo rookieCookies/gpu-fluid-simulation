@@ -7,7 +7,7 @@ use wgpu::{util::{BufferInitDescriptor, DeviceExt}, BufferUsages, ComputePipelin
 
 use crate::{buffer::{ResizableBuffer, SSBO}, shader::create_shader_module, uniform::Uniform};
 
-pub struct Simulation {
+pub struct FluidSimulation {
     settings: SimulationSettings,
     pub tick: u32,
 
@@ -135,7 +135,7 @@ struct ParticleInstance {
 }
 
 
-impl Simulation {
+impl FluidSimulation {
     pub fn new(device: &wgpu::Device, settings: SimulationSettings) -> Self {
         let grid_w = (settings.size.x / settings.smoothing_radius).ceil() as usize + 2;
         let grid_h = (settings.size.y / settings.smoothing_radius).ceil() as usize + 2;
@@ -416,6 +416,17 @@ impl Simulation {
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             cache: None,
         });
+
+
+
+        
+        let jf_shader = create_shader_module(&device, wgpu::ShaderModuleDescriptor {
+            label: Some("jump-flooding-shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/jump_flood.wgsl").into()),
+        });
+
+
+
 
 
         Self {
